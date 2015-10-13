@@ -507,7 +507,7 @@ nsHttpServer.prototype =
   //
   start: function(port)
   {
-    this._start(port, "localhost")
+    this._start(port, "0.0.0.0")
   },
 
   _start: function(port, host)
