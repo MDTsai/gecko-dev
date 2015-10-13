@@ -997,3 +997,6 @@ bin/libfreebl_32int64_3.so
 
 @RESPATH@/components/simpleServices.js
 @RESPATH@/components/utils.manifest
+
+[remotecontrol]
+@RESPATH@/res/remotecontrol/*
