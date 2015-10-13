@@ -1005,3 +1005,6 @@ bin/libfreebl_32int64_3.so
 @RESPATH@/components/httpd.manifest
 @RESPATH@/components/httpd.js
 @RESPATH@/components/test_necko.xpt
+
+[remotecontrol]
+@RESPATH@/res/remotecontrol/*
