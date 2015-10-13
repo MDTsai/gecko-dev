@@ -69,6 +69,8 @@ EXTRA_JS_MODULES += [
     'LogShake.jsm',
     'MultiscreenHandler.jsm',
     'OrientationChangeHandler.jsm',
+    'RemoteControlHttpd.jsm',
+    'RemoteControlService.jsm',
     'SafeMode.jsm',
     'Screenshot.jsm',
     'SignInToWebsite.jsm',

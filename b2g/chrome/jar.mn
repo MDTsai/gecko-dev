@@ -37,6 +37,7 @@ chrome.jar:
   content/touchcontrols.css             (content/touchcontrols.css)
 
   content/identity.js                   (content/identity.js)
+  content/remote_control.js             (content/remote_control.js)
 
 #ifndef MOZ_GRAPHENE
 % override chrome://global/skin/media/videocontrols.css chrome://b2g/content/touchcontrols.css
