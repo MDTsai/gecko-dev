@@ -639,6 +639,14 @@ var settingsToObserve = {
   'mms.debugging.enabled': false,
   'network.debugging.enabled': false,
   'privacy.donottrackheader.enabled': false,
+  'remote-control.enabled': {
+    prefName: 'remotecontrol.service.enabled',
+    resetToPref: true
+  },
+  'remote-control.pairing-required': {
+    prefName: 'remotecontrol.service.pairing_required',
+    resetToPref: true
+  },
   'ril.debugging.enabled': false,
   'ril.radio.disabled': false,
   'ril.mms.requestReadReport.enabled': {

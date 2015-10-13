@@ -36,6 +36,8 @@ chrome.jar:
 
   content/identity.js                   (content/identity.js)
 
+  content/remote_control.js             (content/remote_control.js)
+
 % override chrome://global/skin/media/videocontrols.css chrome://b2g/content/touchcontrols.css
 % override chrome://global/content/aboutCertError.xhtml chrome://b2g/content/aboutCertError.xhtml
 % override chrome://global/skin/netError.css chrome://b2g/content/netError.css
