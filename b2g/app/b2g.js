@@ -1164,3 +1164,17 @@ pref("extensions.blocklist.detailsURL", "https://www.mozilla.com/%LOCALE%/blockl
 #ifdef MOZ_GRAPHENE
 #include ../graphene/graphene.js
 #endif
+
+#ifdef MOZ_B2G_REMOTECONTROLSERVICE
+// Remote Control default setting
+pref("remotecontrol.service.enabled", false);
+pref("remotecontrol.service.pairing_required", false);
+
+// Remote Control URL, for server script (sjs) file
+pref("remotecontrol.server_script.prepath", "resource://gre/res/remotecontrol");
+pref("remotecontrol.server_script.whitelist", "/client.sjs,/pairing.sjs");
+
+pref("remotecontrol.default_server_port", 8080);
+// Remote Control UUID expire time, 90 days
+pref("remotecontrol.UUID_expire_days", 90);
+#endif

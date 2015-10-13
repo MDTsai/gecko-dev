@@ -680,6 +680,16 @@ var settingsToObserve = {
   'network.debugging.enabled': false,
   'privacy.donottrackheader.enabled': false,
   'privacy.trackingprotection.enabled': false,
+#ifdef MOZ_B2G_REMOTECONTROLSERVICE
+  'remote-control.enabled': {
+    prefName: 'remotecontrol.service.enabled',
+    resetToPref: true
+  },
+  'remote-control.pairing-required': {
+    prefName: 'remotecontrol.service.pairing_required',
+    resetToPref: true
+  },
+#endif
   'ril.debugging.enabled': false,
   'ril.radio.disabled': false,
   'ril.mms.requestReadReport.enabled': {
