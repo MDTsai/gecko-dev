@@ -1,0 +1,4 @@
+RESOURCE_FILES.remotecontrol += [
+    'client.sjs',
+]
+

@@ -6,7 +6,7 @@
 
 CONFIGURE_SUBST_FILES += ['installer/Makefile']
 
-DIRS += ['chrome', 'components', 'locales']
+DIRS += ['chrome', 'components', 'locales', 'remotecontrol']
 
 if CONFIG['OS_ARCH'] == 'WINNT':
     DIRS += ['../xulrunner/tools/redit']
