@@ -27,7 +27,8 @@
 "use strict";
 
 /* static functions */
-const DEBUG = true;
+const DEBUG = false;
+const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
   dump("RemoteControlService: " + aStr + "\n");
@@ -68,6 +69,12 @@ const ScriptableInputStream = CC("@mozilla.org/scriptableinputstream;1",
 const RC_SETTINGS_DEVICES = 'remote-control.authorized-devices';
 const RC_SETTINGS_SERVERIP = 'remote-control.server-ip';
 
+function sendChromeEvent(action, details)
+{
+  details.action = action;
+  SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, details);
+}
+
 this.RemoteControlService = {
   _httpServer: null,
   _activeServerAddress: null,
@@ -81,6 +88,9 @@ this.RemoteControlService = {
   _sjs_request_whitelist: null,
   _default_port: null,
   _UUID_expire_days: null,
+  _pin: null,
+  _uuids: null, // uuid : expire_timestamp
+  _pairingRequired: false,
 
   init: function() {
     DEBUG && debug ("init");
@@ -95,12 +105,16 @@ this.RemoteControlService = {
     this._sjs_request_whitelist = Services.prefs.getCharPref("remotecontrol.server_script.whitelist").split(",");
     this._activeServerPort = this._default_port = Services.prefs.getIntPref("remotecontrol.default_server_port");
     this._UUID_expire_days = Services.prefs.getIntPref("remotecontrol.UUID_expire_days");
+    this._pairingRequired = Services.prefs.getBoolPref("remotecontrol.service.pairing_required");
 
     // Listen UUID changes from gaia
     Services.obs.addObserver (this, "mozsettings-changed", false);
 
     // Listen control mode change from gaia
     SystemAppProxy.addEventListener("mozContentEvent", this);
+
+    // Listen pairing_required changes from Gecko preference
+    Services.prefs.addObserver("remotecontrol.service.pairing_required", this, false);
 
     // We use URI to access file, not point to a directory
     // So we handle all request from prefix "/"
@@ -272,6 +286,9 @@ this.RemoteControlService = {
         // Bug 1224118 is follow-up bug for formal cursor mode change
         this._setSharedState("isCursorMode", detail.detail.cursor.toString());
         break;
+      case "remote-control-pin-dismissed":
+        this._clearPIN();
+        break;
     }
   },
 
@@ -320,17 +337,29 @@ this.RemoteControlService = {
 
     dic[uuidString] = timeStamp;
     uuids[uuidString] = timeStamp;
+
+    // Check and remove expired UUID
+    for (uuid in uuids) {
+      var now = new Date().getTime();
+      if (now > parseInt(uuids[uuid])) {
+        delete this._uuids[uuid];
+      }
+    }
+
     lock.set(RC_SETTINGS_DEVICES, JSON.stringify(uuids), null, null);
 
     return dic;
   },
 
   _isValidUUID: function(uuid) {
-    return (uuid in this._uuids);
+    try {
+      return (uuid in this._uuids);
+    } catch (e) {debug (e.message)};
+    return false;
   },
 
   _updateUUID: function(uuid, timestamp) {
-    if (uuid in this._uuids) {
+    if (this._isValidUUID(uuid)) {
       this._uuids[uuid] = timestamp;
     }
   },
@@ -387,8 +416,22 @@ this.RemoteControlService = {
   },
 
   _checkPathFromCookie: function(request) {
-     if (request.path == '/' ) {
-       return "/client.html";
+      if (request.path == "/") {
+         // If pairing setting is false or there is cookie with valid UUID, send client page to the user directly
+         // When check cookie, remove "???" from first 5 character?
+         if (this._pairingRequired == false ||
+           (request.hasHeader("Cookie") &&
+           this._isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5)))) {
+           return "/client.html";
+         } else {
+           var pin = this._getPIN();
+           if (pin === null) {
+             pin = this._generatePIN();
+             // Show notification on screen
+             sendChromeEvent('pin-created', {pincode: pin})
+           }
+           return "/pairing.html";
+        }
      } else {
        return request.path;
      }
@@ -517,6 +560,26 @@ this.RemoteControlService = {
       });
       s.importFunction(function setSharedState(k, v) {
         self._setSharedState(k, v);
+      });
+      s.importFunction(function getPIN()
+      {
+        return self._getPIN();
+      });
+      s.importFunction(function clearPIN()
+      {
+        self._clearPIN();
+      });
+      s.importFunction(function generateUUID()
+      {
+        return self._generateUUID();
+      });
+      s.importFunction(function isValidUUID(uuid)
+      {
+        return self._isValidUUID(uuid);
+      });
+      s.importFunction(function isPairingRequired()
+      {
+        return self._pairingRequired;
       });
 
       try

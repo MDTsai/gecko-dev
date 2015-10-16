@@ -1,4 +1,5 @@
 RESOURCE_FILES.remotecontrol += [
     'client.sjs',
+    'pairing.sjs',
 ]
 

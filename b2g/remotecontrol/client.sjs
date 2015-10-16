@@ -465,6 +465,7 @@ function handleRequest(request, response)
 
   // Split JSON header "message=" and parse event
   var event = JSON.parse(queryString.substring(8));
+  var reply = {};
 
   switch (event.type) {
     case "keypress":
@@ -493,4 +494,9 @@ function handleRequest(request, response)
       handleCustomEvent(event);
       break;
   }
+
+  reply.verified = (isPairingRequired() == false ||
+           (request.hasHeader("Cookie") &&
+           isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5))));
+  response.write(JSON.stringify(reply));
 }
