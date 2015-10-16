@@ -28,6 +28,7 @@
 
 /* static functions */
 const DEBUG = false;
+const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
   dump("RemoteControlService: " + aStr + "\n");
@@ -81,6 +82,9 @@ this.RemoteControlService = {
   _sjs_request_whitelist: null,
   _default_port: null,
   _UUID_expire_days: null,
+  _pin: null,
+  _uuids: null, // record devices uuid : expire_timestamp pair
+  _pairingRequired: false,
 
   init: function() {
     DEBUG && debug("init");
@@ -95,6 +99,7 @@ this.RemoteControlService = {
     this._sjs_request_whitelist = Services.prefs.getCharPref("remotecontrol.server_script.whitelist").split(",");
     this._activeServerPort = this._default_port = Services.prefs.getIntPref("remotecontrol.default_server_port");
     this._UUID_expire_days = Services.prefs.getIntPref("remotecontrol.UUID_expire_days");
+    this._pairingRequired = Services.prefs.getBoolPref("remotecontrol.service.pairing_required");
 
     // Listen UUID changes from gaia
     Services.obs.addObserver (this, "mozsettings-changed", false);
@@ -102,12 +107,19 @@ this.RemoteControlService = {
     // Listen control mode change from gaia
     SystemAppProxy.addEventListener("mozContentEvent", this);
 
+    // Listen pairing_required changes from Gecko preference
+    Services.prefs.addObserver("remotecontrol.service.pairing_required", this, false);
+
     // Register path to channel handler for Remote Control Service's path transfer logic
     this._httpServer.registerPathToChannelHandler(this._pathToChannelHandler);
 
     // Register internal functions export to SJS
     this._httpServer.registerSJSFunctions({
+      "getPIN": this._getPIN,
+      "clearPIN": this._clearPIN,
       "generateUUID": this._generateUUID,
+      "isPairingRequired": this._isPairingRequired,
+      "hasValidUUIDInCookie": this._hasValidUUIDInCookie,
     });
 
     // Get stored UUIDs from SettingsDB
@@ -215,6 +227,13 @@ this.RemoteControlService = {
 
         break;
       }
+      case "nsPref:changed": {
+        // Monitor pairing_required change
+        if (data == "remotecontrol.service.pairing_required") {
+          this._pairingRequired = Services.prefs.getBoolPref(data);
+        }
+        break;
+      }
     }
   },
 
@@ -235,6 +254,13 @@ this.RemoteControlService = {
         // Server script use "isCursorMode" to determine what kind event should dispatch to app
         // Bug 1224118 is a follow-up bug to implement a non-mozContentEvent way to receive control mode change
         this._httpServer.setSharedState("isCursorMode", detail.detail.cursor.toString());
+        break;
+      case "remote-control-pin-dismissed":
+        // System App dismiss PIN code in notification on screen when
+        // 1) user doesn't send PIN code in 30 seconds or
+        // 2) user send PIN code.
+        // Receive this notification means current PIN code is invalid and have to clear the PIN code
+        this._clearPIN();
         break;
     }
   },
@@ -395,25 +421,34 @@ this.RemoteControlService = {
     lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
   },
 
-  // For RemoteControlHTTPd receives a request with path, retrieve a channel for response
-  _pathToChannelHandler: function(request) {
-    let self = RemoteControlService;
+  // Export to SJS for evaluating client's request is valid
+  _isPairingRequired: function() {
+    return RemoteControlService._pairingRequired;
+  },
 
-    if (self._static_request_blacklist.indexOf(request.path) >= 0) {
-      // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
-      // For other static files in Gaia, they change frequently. So we don't use whitelist here.
-      throw HTTP_403;
-    } else if (self._sjs_request_whitelist.indexOf(request.path) >= 0) {
-      // For server script, we only accept these files for dispatch event and pairing only, so use whitelist
-      return Services.io.newChannel(self._server_script_prepath + request.path, null, null);
-    } else if (self._isValidPath(request.path)) {
-      // Handle static files request
-      let path = self._transferRequestToPath(request);
-      let baseURI = Services.io.newURI(self._client_page_prepath, null, null);
-      return Services.io.newChannel(path, null, baseURI);
-    } else {
-      throw HTTP_404;
+  _zeroFill: function(number, width) {
+    width -= number.toString().length;
+    if ( width > 0 )
+    {
+      return new Array( width + (/\./.test( number ) ? 2 : 1) ).join( '0' ) + number;
     }
+    return number + ""; // always return a string
+  },
+
+  // Generate PIN code for pairing, format is 4 digits
+  _generatePIN: function() {
+    this._pin = this._zeroFill (Math.floor(Math.random() * 10000), 4);
+    return this._pin;
+  },
+
+  // Export to SJS for examming client's PIN code
+  _getPIN: function() {
+    return RemoteControlService._pin;
+  },
+
+  // Export to SJS for cleaning current PIN code
+  _clearPIN: function() {
+    RemoteControlService._pin = null;
   },
 
   // Check incoming path is valid or not
@@ -442,12 +477,71 @@ this.RemoteControlService = {
     return false;
   },
 
+  // For RemoteControlHTTPd receives a request with path, retrieve a channel for response
+  _pathToChannelHandler: function(request) {
+    let self = RemoteControlService;
+
+    if (self._static_request_blacklist.indexOf(request.path) >= 0) {
+      // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
+      // For other static files in Gaia, they change frequently. So we don't use whitelist here.
+      throw HTTP_403;
+    } else if (self._sjs_request_whitelist.indexOf(request.path) >= 0) {
+      // For server script, we only accept these files for dispatch event and pairing only, so use whitelist
+      return Services.io.newChannel(self._server_script_prepath + request.path, null, null);
+    } else if (self._isValidPath(request.path)) {
+      // Handle static files request
+      let path = self._transferRequestToPath(request);
+      let baseURI = Services.io.newURI(self._client_page_prepath, null, null);
+      return Services.io.newChannel(path, null, baseURI);
+    } else {
+      throw HTTP_404;
+    }
+  },
+
+  // Export to SJS for evaluating client's request contains valid UUID
+  _hasValidUUIDInCookie: function(request) {
+    // Return false if there is no cookie in header
+    if (!request.hasHeader("Cookie")) {
+      return false;
+    }
+
+    // Split cookie from header
+    // If cookie name is "uuid" and value is a valid UUID stored, return true
+    var cookies = request.getHeader("Cookie").split(";");
+    for (let i = 0; i < cookies.length; i++) {
+      let cookie = decodeURIComponent(cookies[i]);
+      let cookieName = cookie.substr(0, cookie.indexOf("="));
+      let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
+
+      cookieName = cookieName.replace(/^\s+|\s+$/g, "");
+      if (cookieName == "uuid" && RemoteControlService._isValidUUID(cookieValue)) {
+        return true;
+      }
+    }
+
+    return false;
+  },
+
   _transferRequestToPath: function(request) {
-   if (request.path == "/" ) {
-     return "/client.html";
-   } else {
-     return request.path;
-   }
+    if (request.path == "/") {
+      // If it's not need to pairing or there is cookie with valid UUID
+      // Send client.html to the user directly to use RemoteControl
+      // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
+      // Send pairing.html to start pairing
+      if (this._pairingRequired == false || this._hasValidUUIDInCookie(request)) {
+        return "/client.html";
+      } else {
+        var pin = this._getPIN();
+        if (pin === null) {
+          pin = this._generatePIN();
+          // Show notification on screen
+          SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { pincode: pin, action: 'pin-created' });
+        }
+        return "/pairing.html";
+      }
+    } else {
+      return request.path;
+    }
   },
 };
 
