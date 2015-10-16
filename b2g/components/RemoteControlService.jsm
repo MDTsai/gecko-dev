@@ -19,7 +19,8 @@
 "use strict";
 
 /* static functions */
-const DEBUG = true;
+const DEBUG = false;
+const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
   DEBUG && dump("RemoteControlService: " + aStr + "\n");
@@ -81,12 +82,19 @@ function NS_ASSERT(cond, msg)
   }
 }
 
+function sendChromeEvent(action, details)
+{
+  details.action = action;
+  SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, details);
+}
+
 this.RemoteControlService = {
   _httpServer: null,
   _state: {},
   _sharedState: {},
   _pin: null,
   _uuids: null, // uuid : expire_timestamp
+  _pairingRequired: false,
 
   init: function() {
     debug ("init");
@@ -116,13 +124,17 @@ this.RemoteControlService = {
       handle: function(name, result) {
         switch (name) {
           case RC_SETTINGS_DEVICES:
-            RemoteControlService._uuids = JSON.parse (result);
-            RemoteControlService._clearAllUUID();
+            if (result === null) RemoteControlService._uuids = {};
+            else RemoteControlService._uuids = JSON.parse (result);
             break;
           case RC_SETTINGS_ENABLED:
             if (result) {
               RemoteControlService.start();
             }
+            break;
+          case RC_SETTINGS_PAIRING:
+            if (result === null) RemoteControlService._pairingRequired = false;
+            else RemoteControlService._pairingRequired = result;
             break;
         }
       },
@@ -135,6 +147,7 @@ this.RemoteControlService = {
     var lock = SettingsService.createLock();
     lock.get (RC_SETTINGS_DEVICES, settingsCallback);
     lock.get (RC_SETTINGS_ENABLED, settingsCallback);
+    lock.get (RC_SETTINGS_PAIRING, settingsCallback);
   },
 
   start: function(ipaddr, port) {
@@ -145,7 +158,7 @@ this.RemoteControlService = {
     if (ipaddr) {
       this._httpServer.identity.add ("http", ipaddr, _port);
       this._httpServer.start(_port);
-      lock.set(RC_SETTINGS_SERVERIP, ipaddr, null, null);
+      lock.set(RC_SETTINGS_SERVERIP, ipaddr + ":" + _port, null, null);
     } else {
       var nm;
       try {
@@ -173,7 +186,7 @@ this.RemoteControlService = {
 
         this._httpServer.identity.add ("http", _ipaddr, _port);
         this._httpServer.start(_port);
-        lock.set(RC_SETTINGS_SERVERIP, "http://" + _ipaddr + ":" + _port, null, null);
+        lock.set(RC_SETTINGS_SERVERIP, _ipaddr + ":" + _port, null, null);
       }
     }
   },
@@ -203,7 +216,8 @@ this.RemoteControlService = {
       switch (subject["key"]) {
         case  RC_SETTINGS_DEVICES:
           debug ("onObserved, RC_SETTINGS_DEVICES: " + subject["value"]);
-          this._uuids = JSON.parse(subject["value"]);
+          if (subject["value"] === null) this._uuids = {};
+          else this._uuids = JSON.parse(subject["value"]);
           break;
         case RC_SETTINGS_ENABLED:
           debug ("onObserved, RC_SETTINGS_ENABLED: " + subject["value"]);
@@ -212,6 +226,10 @@ this.RemoteControlService = {
           } else {
             this.stop();
           }
+          break;
+        case RC_SETTINGS_PAIRING:
+          debug ("onObserved, RC_SETTINGS_ENABLED: " + subject["value"]);
+          this._pairingRequired = subject["value"];
           break;
       }
     }
@@ -230,6 +248,9 @@ this.RemoteControlService = {
     switch (detail.type) {
       case "control-mode-changed":
         this._setSharedState("isCursorMode", detail.detail.cursor.toString());
+        break;
+      case "remote-control-pin-dismissed":
+        this._clearPIN();
         break;
     }
   },
@@ -288,17 +309,29 @@ this.RemoteControlService = {
 
     dic[uuidString] = timeStamp;
     uuids[uuidString] = timeStamp;
+
+    // Check and remove expired UUID
+    for (uuid in uuids) {
+      var now = new Date().getTime();
+      if (now > parseInt(uuids[uuid])) {
+        delete this._uuids[uuid];
+      }
+    }
+
     lock.set(RC_SETTINGS_DEVICES, JSON.stringify(uuids), callback, null);
 
     return dic;
   },
 
   _isValidUUID: function(uuid) {
-    return (uuid in this._uuids);
+    try {
+      return (uuid in this._uuids);
+    } catch (e) {debug (e.message)};
+    return false;
   },
 
   _updateUUID: function(uuid, timestamp) {
-    if (uuid in this._uuids) {
+    if (this._isValidUUID(uuid)) {
       this._uuids[uuid] = timestamp;
     }
   },
@@ -372,12 +405,20 @@ this.RemoteControlService = {
   },
 
   _checkPathFromCookie: function(request) {
-    /*
-      if (request.path=='/' && request.hasHeader("Cookie")) {
-         return this._isValidUUID (request.getHeader("Cookie")) ? "/client.html" : "/pairing.html";
-    */
-     if (request.path=='/' ) {
-         return "/client.html";
+      if (request.path == "/") {
+         if (this._pairingRequired == false ||
+           (request.hasHeader("Cookie") &&
+           this._isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5)))) {
+           return "/client.html";
+         } else {
+           var pin = this._getPIN();
+           if (pin === null) {
+             pin = this._generatePIN();
+             // Show notification on screen
+             sendChromeEvent('pin-created', {pincode: pin})
+           }
+           return "/pairing.html";
+        }
      } else {
        return request.path;
      }
@@ -508,6 +549,26 @@ this.RemoteControlService = {
       s.importFunction(function setSharedState(k, v)
       {
         self._setSharedState(k, v);
+      });
+      s.importFunction(function getPIN()
+      {
+        return self._getPIN();
+      });
+      s.importFunction(function clearPIN()
+      {
+        self._clearPIN();
+      });
+      s.importFunction(function generateUUID()
+      {
+        return self._generateUUID();
+      });
+      s.importFunction(function isValidUUID(uuid)
+      {
+        return self._isValidUUID(uuid);
+      });
+      s.importFunction(function isPairingRequired()
+      {
+        return self._pairingRequired;
       });
 
       try
