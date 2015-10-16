@@ -18,6 +18,10 @@
  * - textinput: send remote text input to TV system app, TV system app acts as an InputMethod and paste text on input field
  * - custom: event not listed above, but need dispatch to TV system app directly
  *
+ * After every event, client.sjs sends reply to client page in response if the connection is still valid if:
+ * 1) No pairing required or 2) already paired UUID is not expired.
+ * Client page should reload and do pairing again when receives "{ verified: false}"
+ *
  * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control#Ajax_Protocol
  */
 
@@ -459,38 +463,51 @@ function handleRemoteTextInput(detail)
 // queryString format: message={ type: <event type>, detail: { <event detail>} }
 function handleRequest(request, response)
 {
-  var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
+  var requestIsValid = (isPairingRequired() == false ||
+                             (request.hasHeader("Cookie") &&
+                              isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5))));
 
-  response.setHeader("Content-Type", "text/html", false);
+  // client.sjs handles the event only when the request is valid.
+  if (requestIsValid) {
+    var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
 
-  // Split JSON header "message=" and parse event
-  var event = JSON.parse(queryString.substring(8));
+    response.setHeader("Content-Type", "text/html", false);
 
-  switch (event.type) {
-    case "keypress":
-      handleKeyboardEvent(event.detail);
-      break;
-    case "touchstart":
-    case "touchmove":
-    case "touchend":
-      DEBUG && debug(JSON.stringify(event));
-      handleTouchEvent(event);
-      break;
-    case "scrollmove":
-    case "scrollend":
-      DEBUG && debug(JSON.stringify(event));
-      handleWheelEvent(event);
-      break;
-    case "click":
-    case "dblclick":
-      DEBUG && debug(JSON.stringify(event));
-      handleClickEvent(event);
-      break;
-    case "textinput":
-      handleRemoteTextInput(event.detail);
-      break;
-    case "custom":
-      handleCustomEvent(event);
-      break;
+    // Split JSON header "message=" and parse event
+    var event = JSON.parse(queryString.substring(8));
+    var reply = {};
+
+    switch (event.type) {
+      case "keypress":
+        handleKeyboardEvent(event.detail);
+        break;
+      case "touchstart":
+      case "touchmove":
+      case "touchend":
+        DEBUG && debug(JSON.stringify(event));
+        handleTouchEvent(event);
+        break;
+      case "scrollmove":
+      case "scrollend":
+        DEBUG && debug(JSON.stringify(event));
+        handleWheelEvent(event);
+        break;
+      case "click":
+      case "dblclick":
+        DEBUG && debug(JSON.stringify(event));
+        handleClickEvent(event);
+        break;
+      case "textinput":
+        handleRemoteTextInput(event.detail);
+        break;
+      case "custom":
+        handleCustomEvent(event);
+        break;
+    }
   }
+
+  // Send { verified: true } if: 1) No pairing required or 2) already paired UUID is not expired.
+  // client should reload and get pairing.html to pairing again
+  reply.verified = requestIsValid;
+  response.write(JSON.stringify(reply));
 }
