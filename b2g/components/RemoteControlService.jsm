@@ -28,6 +28,7 @@
 
 /* static functions */
 const DEBUG = false;
+const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
   dump("RemoteControlService: " + aStr + "\n");
@@ -79,13 +80,15 @@ this.RemoteControlService = {
   _activeServerPort: null,
   _state: {},
   _sharedState: {},
-  _uuids: null, // record devices uuid : expire_timestamp pair
   _client_page_prepath: null,
   _static_request_blacklist: null,
   _server_script_prepath: null,
   _sjs_request_whitelist: null,
   _default_port: null,
   _UUID_expire_days: null,
+  _pin: null,
+  _uuids: null, // record devices uuid : expire_timestamp pair
+  _pairingRequired: false,
 
   init: function() {
     DEBUG && debug("init");
@@ -100,12 +103,16 @@ this.RemoteControlService = {
     this._sjs_request_whitelist = Services.prefs.getCharPref("remotecontrol.server_script.whitelist").split(",");
     this._activeServerPort = this._default_port = Services.prefs.getIntPref("remotecontrol.default_server_port");
     this._UUID_expire_days = Services.prefs.getIntPref("remotecontrol.UUID_expire_days");
+    this._pairingRequired = Services.prefs.getBoolPref("remotecontrol.service.pairing_required");
 
     // Listen UUID changes from gaia
     Services.obs.addObserver (this, "mozsettings-changed", false);
 
     // Listen control mode change from gaia
     SystemAppProxy.addEventListener("mozContentEvent", this);
+
+    // Listen pairing_required changes from Gecko preference
+    Services.prefs.addObserver("remotecontrol.service.pairing_required", this, false);
 
     // We use URI to access file, not point to a directory
     // So we handle all request from prefix "/"
@@ -118,7 +125,12 @@ this.RemoteControlService = {
       handle: function(name, result) {
         switch (name) {
           case RC_SETTINGS_DEVICES:
-            RemoteControlService._uuids = result;
+            if (result === null) {
+              // If there is no device UUIDs in settings DB, set to empty key pair
+              RemoteControlService._uuids = {};
+            } else {
+              RemoteControlService._uuids = result;
+            }
             break;
         }
       },
@@ -320,6 +332,13 @@ this.RemoteControlService = {
 
         break;
       }
+      case "nsPref:changed": {
+        // Monitor pairing_required change
+        if (data == "remotecontrol.service.pairing_required") {
+          this._pairingRequired = Services.prefs.getBoolPref(data);
+        }
+        break;
+      }
     }
   },
 
@@ -339,6 +358,13 @@ this.RemoteControlService = {
         // Server script use "isCursorMode" to determine what kind event should dispatch to app
         // Bug 1224118 is a follow-up bug to implement a non-mozContentEvent way to receive control mode change
         this._setSharedState("isCursorMode", detail.detail.cursor.toString());
+        break;
+      case "remote-control-pin-dismissed":
+        // System App dismiss PIN code in notification on screen when
+        // 1) user doesn't send PIN code in 30 seconds or
+        // 2) user send PIN code.
+        // Receive this notification means current PIN code is invalid and have to clear the PIN code
+        this._clearPIN();
         break;
     }
   },
@@ -382,15 +408,22 @@ this.RemoteControlService = {
   _generateUUID: function() {
     let uuidString = UUIDGenerator.generateUUID().toString();
     let timeStamp = ((new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
-    let dic = {};
     let lock = SettingsService.createLock();
     let uuids = this._uuids;
 
-    dic[uuidString] = timeStamp;
     uuids[uuidString] = timeStamp;
+
+    // Check and remove expired UUID
+    for (let uuid in uuids) {
+      let now = new Date().getTime();
+      if (now > parseInt(uuids[uuid])) {
+        delete this._uuids[uuid];
+      }
+    }
+
     lock.set(RC_SETTINGS_DEVICES, uuids, null);
 
-    return dic;
+    return uuidString;
   },
 
   _isValidUUID: function(uuid) {
@@ -398,7 +431,7 @@ this.RemoteControlService = {
   },
 
   _updateUUID: function(uuid, timestamp) {
-    if (uuid in this._uuids) {
+    if (this._isValidUUID(uuid)) {
       this._uuids[uuid] = timestamp;
     }
   },
@@ -417,6 +450,29 @@ this.RemoteControlService = {
 
     this._uuids = {};
     lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
+  },
+
+  _zeroFill: function(number, width) {
+    width -= number.toString().length;
+    if ( width > 0 )
+    {
+      return new Array( width + (/\./.test( number ) ? 2 : 1) ).join( '0' ) + number;
+    }
+    return number + ""; // always return a string
+  },
+
+  // Generate PIN code for pairing, format is 4 digits
+  _generatePIN: function() {
+    this._pin = this._zeroFill (Math.floor(Math.random() * 10000), 4);
+    return this._pin;
+  },
+
+  _getPIN: function() {
+    return this._pin;
+  },
+
+  _clearPIN: function() {
+    this._pin = null;
   },
 
   // Check incoming path is valid or not
@@ -458,11 +514,28 @@ this.RemoteControlService = {
   },
 
   _transferRequestToPath: function(request) {
-     if (request.path == "/" ) {
-       return "/client.html";
-     } else {
-       return request.path;
-     }
+    if (request.path == "/") {
+      // If it's not need to pairing or there is cookie with valid UUID
+      // Send client.html to the user directly to use RemoteControl
+      // When check cookie, remove "uuid=" from first 5 character from cookie to get correct UUID
+      // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
+      // Send pairing.html to start pairing
+      if (this._pairingRequired == false ||
+          (request.hasHeader("Cookie") &&
+            this._isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5)))) {
+        return "/client.html";
+      } else {
+        var pin = this._getPIN();
+        if (pin === null) {
+          pin = this._generatePIN();
+          // Show notification on screen
+          SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { pincode: pin, action: 'pin-created' });
+        }
+        return "/pairing.html";
+      }
+    } else {
+      return request.path;
+    }
   },
 
   // Clone from _writeFileResponse in httpd.js and split to two part:
@@ -573,6 +646,22 @@ this.RemoteControlService = {
       });
       s.importFunction(function setSharedState(key, value) {
         self._setSharedState(key, value);
+      });
+      // Import PIN and UUID related function for sjs in sandbox
+      s.importFunction(function getPIN() {
+        return self._getPIN();
+      });
+      s.importFunction(function clearPIN() {
+        self._clearPIN();
+      });
+      s.importFunction(function generateUUID() {
+        return self._generateUUID();
+      });
+      s.importFunction(function isValidUUID(uuid) {
+        return self._isValidUUID(uuid);
+      });
+      s.importFunction(function isPairingRequired() {
+        return self._pairingRequired;
       });
 
       try {
