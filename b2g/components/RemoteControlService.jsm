@@ -264,6 +264,12 @@ this.RemoteControlService = {
 
         break;
       }
+      case "nsPref:changed": {
+        if (data == "remotecontrol.service.pairing_required") {
+          this._pairingRequired = Services.prefs.getBoolPref(data);
+        }
+        break;
+      }
     }
   },
 
@@ -378,6 +384,29 @@ this.RemoteControlService = {
 
     this._uuids = {};
     lock.set(RC_SETTINGS_DEVICES, JSON.stringify(this._uuids), null, null);
+  },
+
+  _zeroFill: function(number, width) {
+    width -= number.toString().length;
+    if ( width > 0 )
+    {
+      return new Array( width + (/\./.test( number ) ? 2 : 1) ).join( '0' ) + number;
+    }
+    return number + ""; // always return a string
+  },
+
+  // Generate PIN code for pairing, format is 4 digits
+  _generatePIN: function() {
+    this._pin = this._zeroFill (Math.floor(Math.random() * 10000), 4);
+    return this._pin;
+  },
+
+  _getPIN: function() {
+    return this._pin;
+  },
+
+  _clearPIN: function() {
+    this._pin = null;
   },
 
   // Check incoming path is valid or not

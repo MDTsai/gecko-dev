@@ -12,9 +12,7 @@ const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug (message)
 {
-  if (DEBUG) {
-    dump(message + '\n');
-  }
+    dump("pairing.sjs: " + message + '\n');
 }
 
 function sendChromeEvent(action, details)
