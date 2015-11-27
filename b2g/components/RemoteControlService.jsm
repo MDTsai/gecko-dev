@@ -35,7 +35,7 @@ function debug(aStr) {
 
 this.EXPORTED_SYMBOLS = ["RemoteControlService"];
 
-const { classes: Cc, interfaces: Ci, utils: Cu, Constructor: CC } = Components;
+const { classes: Cc, interfaces: Ci, results: Cr, utils: Cu, Constructor: CC } = Components;
 
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
@@ -88,6 +88,7 @@ this.RemoteControlService = {
   _sjs_request_whitelist: null,
   _default_port: null,
   _UUID_expire_days: null,
+  _mDNSCancelableHandler: null,
 
   init: function() {
     DEBUG && debug ("init");
@@ -187,6 +188,21 @@ this.RemoteControlService = {
       lock.set(RC_SETTINGS_SERVERIP, this._activeServerAddress + ":" + this._activeServerPort, null, null);
     }
 
+    // Register mDNS http service with activeServerPort and path as "/"
+    if (("@mozilla.org/toolkit/components/mdnsresponder/dns-sd;1" in Cc)) {
+      let serviceInfo = Cc["@mozilla.org/toolkit/components/mdnsresponder/dns-info;1"].createInstance(Ci.nsIDNSServiceInfo);
+      serviceInfo.serviceType = "_http._tcp";
+      serviceInfo.serviceName = Services.prefs.getCharPref("dom.presentation.device.name");
+      serviceInfo.port = this._activeServerPort;
+
+      let attributes = Cc["@mozilla.org/hash-property-bag;1"].createInstance(Ci.nsIWritablePropertyBag2);
+      attributes.setPropertyAsACString("path", "/");
+      serviceInfo.attributes = attributes;
+
+      let mdns = Cc["@mozilla.org/toolkit/components/mdnsresponder/dns-sd;1"].getService(Ci.nsIDNSServiceDiscovery);
+      this._mDNSCancelableHandler = mdns.registerService(serviceInfo, null);
+    }
+
     // Start httpServer anyway, while identity is ready, httpServer can accept
     this._httpServer.start(this._activeServerPort);
     this._serverStatus = SERVER_STATUS.START;
@@ -206,6 +222,12 @@ this.RemoteControlService = {
       Services.obs.removeObserver(this, "network-active-changed");
       Services.obs.removeObserver(this, "network:offline-status-changed");
     }
+
+    if (this._mDNSCancelableHandler) {
+      this._mDNSCancelableHandler.Cancel(Cr.NS_OK);
+      this._mDNSCancelableHandler = null;
+    }
+
     this._serverStatus = SERVER_STATUS.STOP;
   },
 
