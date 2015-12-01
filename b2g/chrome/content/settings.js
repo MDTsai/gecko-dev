@@ -613,6 +613,21 @@ SettingsListener.observe('debug.performance_data.dogfooding', false,
   });
 #endif
 
+// ======================= Remote Control ==========================
+(function setupRemoteControlSettings() {
+  // Use AppConstants.MOZ_B2G_REMOTECONTROLSERVICE to enable/disable
+  // observe settings change from Gaia and set to Gecko preference
+  if (AppConstants.MOZ_B2G_REMOTECONTROLSERVICE) {
+    SettingsListener.observe('remote-control.enabled', true, function(value) {
+      Services.prefs.setBoolPref('remotecontrol.service.enabled', value);
+    });
+
+    SettingsListener.observe('remote-control.pairing-required', true, function(value) {
+      Services.prefs.setBoolPref('remotecontrol.service.pairing_required', value);
+    });    
+  }
+})();
+
 // =================== Various simple mapping  ======================
 var settingsToObserve = {
   'accessibility.screenreader_quicknav_modes': {
@@ -680,16 +695,6 @@ var settingsToObserve = {
   'network.debugging.enabled': false,
   'privacy.donottrackheader.enabled': false,
   'privacy.trackingprotection.enabled': false,
-#ifdef MOZ_B2G_REMOTECONTROLSERVICE
-  'remote-control.enabled': {
-    prefName: 'remotecontrol.service.enabled',
-    resetToPref: true
-  },
-  'remote-control.pairing-required': {
-    prefName: 'remotecontrol.service.pairing_required',
-    resetToPref: true
-  },
-#endif
   'ril.debugging.enabled': false,
   'ril.radio.disabled': false,
   'ril.mms.requestReadReport.enabled': {

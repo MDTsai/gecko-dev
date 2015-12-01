@@ -21,7 +21,7 @@
  * gaia/tv_apps/remote-control - remote control app
  * gaia/tv_apps/remote-control-client - remote control client page static files
  *
- * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control
+ * For more details, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control
  */
 
 "use strict";
@@ -48,7 +48,7 @@ XPCOMUtils.defineLazyModuleGetter(this, "HttpServer",
                           "resource://gre/modules/RemoteControlHttpd.jsm");
 
 XPCOMUtils.defineLazyServiceGetter(this, "UUIDGenerator",
-                          '@mozilla.org/uuid-generator;1', 'nsIUUIDGenerator');
+                          "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
 
 XPCOMUtils.defineLazyServiceGetter(this, "SettingsService",
                           "@mozilla.org/settingsService;1", "nsISettingsService");
@@ -65,18 +65,18 @@ const ScriptableInputStream = CC("@mozilla.org/scriptableinputstream;1",
 // For bi-direction share with Gaia remote-control app, use mozSettings here, not Gecko preference
 // Ex. the service adds authorized devices, app can revoke all
 // We may switch to a new API, like FlyWeb, which can achieve but not using mozSettings
-const RC_SETTINGS_DEVICES = 'remote-control.authorized-devices';
-const RC_SETTINGS_SERVERIP = 'remote-control.server-ip';
+const RC_SETTINGS_DEVICES = "remote-control.authorized-devices";
+const RC_SETTINGS_SERVERIP = "remote-control.server-ip";
 
 const SERVER_STATUS = {
-  STOP: {value: 0},
-  STARTING: {value: 1},
-  START: {value: 2}
+  STOPPED: 0,
+  STARTING: 1,
+  STARTED: 2
 };
 
 this.RemoteControlService = {
   _httpServer: null,
-  _serverStatus: SERVER_STATUS.STOP,
+  _serverStatus: SERVER_STATUS.STOPPED,
   _activeServerAddress: null,
   _activeServerPort: null,
   _state: {},
@@ -90,7 +90,7 @@ this.RemoteControlService = {
   _UUID_expire_days: null,
 
   init: function() {
-    DEBUG && debug ("init");
+    DEBUG && debug("init");
 
     this._httpServer = new HttpServer();
     this._uuids = {};
@@ -132,10 +132,10 @@ this.RemoteControlService = {
   },
 
   start: function(ipaddr, port) {
-    if (this._serverStatus != SERVER_STATUS.STOP) {
+    if (this._serverStatus != SERVER_STATUS.STOPPED) {
       return;
     }
-    DEBUG && debug ("start");
+    DEBUG && debug("start");
     this._serverStatus = SERVER_STATUS.STARTING;
     this._activeServerAddress = null;
     this._activeServerPort = port ? port : this._default_port;
@@ -152,19 +152,18 @@ this.RemoteControlService = {
         if (nm.activeNetworkInfo) {
           let ipAddresses = {};
           let prefixes = {};
-          let numOfIpAddresses = nm.activeNetworkInfo.getAddresses (ipAddresses, prefixes);
+          let numOfIpAddresses = nm.activeNetworkInfo.getAddresses(ipAddresses, prefixes);
 
           this._activeServerAddress = ipAddresses.value;
         }
 
         // Monitor network status to pause/restart service
-        Services.obs.addObserver (this, "network-active-changed", false);
+        Services.obs.addObserver(this, "network-active-changed", false);
         Services.obs.addObserver(this, "network:offline-status-changed", false);
       } else {
         // In b2g-desktop, use dns reverse lookup local ip address. Modify /etc/hosts if necessary
         let dns = Cc["@mozilla.org/network/dns-service;1"]
                        .getService(Ci.nsIDNSService);
-        //this._activeServerAddress = dns.resolve(dns.myHostName, 0).getNextAddrAsString();
         let activeServerAddressDNSListener = {
           onLookupComplete: function(aRequest, aRecord, aStatus) {
             if (aRecord) {
@@ -180,20 +179,23 @@ this.RemoteControlService = {
       }
     }
 
-    if (!(this._activeServerAddress === null)) {
+    if (this._activeServerAddress !== null) {
       let lock = SettingsService.createLock();
 
       this._httpServer.identity.add("http", this._activeServerAddress, this._activeServerPort);
       lock.set(RC_SETTINGS_SERVERIP, this._activeServerAddress + ":" + this._activeServerPort, null, null);
     }
 
+    // Monitor xpcom-shutdown to stop service and clean up
+    Services.obs.addObserver(this, "xpcom-shutdown", false);
+
     // Start httpServer anyway, while identity is ready, httpServer can accept
     this._httpServer.start(this._activeServerPort);
-    this._serverStatus = SERVER_STATUS.START;
+    this._serverStatus = SERVER_STATUS.STARTED;
   },
 
   stop: function() {
-    if (this._serverStatus != SERVER_STATUS.START) {
+    if (this._serverStatus != SERVER_STATUS.STARTED) {
       return;
     }
 
@@ -206,7 +208,9 @@ this.RemoteControlService = {
       Services.obs.removeObserver(this, "network-active-changed");
       Services.obs.removeObserver(this, "network:offline-status-changed");
     }
-    this._serverStatus = SERVER_STATUS.STOP;
+    Services.obs.removeObserver(this, "xpcom-shutdown");
+
+    this._serverStatus = SERVER_STATUS.STOPPED;
   },
 
   _pause: function() {
@@ -266,6 +270,11 @@ this.RemoteControlService = {
 
         break;
       }
+      case "xpcom-shutdown": {
+        // Stop service when xpcom-shutdown
+        this.stop();
+        break;
+      }
       case "mozsettings-changed": {
         // Receive UUID changes from gaia revoke all pairing, store to internal cache
         if ("wrappedJSObject" in subject) {
@@ -304,30 +313,35 @@ this.RemoteControlService = {
   // Clone get/set state/sharedState from httpd.js for runtime state
   _getState: function(path, key) {
     let state = this._state;
-    if (path in state && key in state[path])
+    if (path in state && key in state[path]) {
       return state[path][key];
+    }
     return "";
   },
 
   _setState: function(path, key, value) {
-    if (typeof value !== "string")
+    if (typeof value !== "string") {
       throw new Error("non-string value passed");
+    }
     let state = this._state;
-    if (!(path in state))
+    if (!(path in state)) {
       state[path] = {};
+    }
     state[path][key] = value;
   },
 
   _getSharedState: function(key) {
     let state = this._sharedState;
-    if (key in state)
+    if (key in state) {
       return state[key];
+    }
     return "";
   },
 
   _setSharedState: function(key, value) {
-    if (typeof value !== "string")
+    if (typeof value !== "string") {
       throw new Error("non-string value passed");
+    }
     this._sharedState[key] = value;
   },
 
@@ -410,7 +424,7 @@ this.RemoteControlService = {
     }
   },
 
-  _checkPathFromCookie: function(request) {
+  _transferRequestToPath: function(request) {
      if (request.path == "/" ) {
        return "/client.html";
      } else {
@@ -425,7 +439,7 @@ this.RemoteControlService = {
     const PR_RDONLY = 0x01;
     const PERMS_READONLY = (4 << 6) | (4 << 3) | 4;
 
-    let path = this._checkPathFromCookie(request);
+    let path = this._transferRequestToPath(request);
     let baseURI = Services.io.newURI(this._client_page_prepath, null, null);
     let channel = Services.io.newChannel(path, null, baseURI);
     let fis = channel.open();
@@ -433,7 +447,7 @@ this.RemoteControlService = {
     let offset = 0;
     let count = fis.available();
 
-    if (path.endsWith("css")) {
+    if (path.endsWith(".css")) {
       response.setHeader("Content-Type", "text/css;charset=utf-8", false);
     } else {
       response.setHeader("Content-Type", "text/html;charset=utf-8", false);
@@ -506,7 +520,7 @@ this.RemoteControlService = {
 
     try {
       let sis = new ScriptableInputStream(fis);
-      let s = Cu.Sandbox (Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal));
+      let s = Cu.Sandbox(Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal));
       s.importFunction(dump, "dump");
       s.importFunction(atob, "atob");
       s.importFunction(btoa, "btoa");
@@ -515,17 +529,17 @@ this.RemoteControlService = {
       // keys initially corresponding to the empty string.
       let self = RemoteControlService;
       let path = request.path;
-      s.importFunction(function getState(k) {
-        return self._getState(path, k);
+      s.importFunction(function getState(key) {
+        return self._getState(path, key);
       });
-      s.importFunction(function setState(k, v) {
-        self._setState(path, k, v);
+      s.importFunction(function setState(key, value) {
+        self._setState(path, key, value);
       });
-      s.importFunction(function getSharedState(k) {
-        return self._getSharedState(k);
+      s.importFunction(function getSharedState(key) {
+        return self._getSharedState(key);
       });
-      s.importFunction(function setSharedState(k, v) {
-        self._setSharedState(k, v);
+      s.importFunction(function setSharedState(key, value) {
+        self._setSharedState(key, value);
       });
 
       try {
