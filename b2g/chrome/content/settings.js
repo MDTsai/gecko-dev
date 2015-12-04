@@ -606,6 +606,21 @@ if (AppConstants.MOZ_B2G_RIL) {
     });
 }
 
+// ======================= Remote Control ==========================
+(function setupRemoteControlSettings() {
+  // Use AppConstants.MOZ_B2G_REMOTECONTROLSERVICE to enable/disable
+  // observe settings change from Gaia and set to Gecko preference
+  if (AppConstants.MOZ_B2G_REMOTECONTROLSERVICE) {
+    SettingsListener.observe('remote-control.enabled', true, function(value) {
+      Services.prefs.setBoolPref('remotecontrol.service.enabled', value);
+    });
+
+    SettingsListener.observe('remote-control.pairing-required', true, function(value) {
+      Services.prefs.setBoolPref('remotecontrol.service.pairing_required', value);
+    });
+  }
+})();
+
 // =================== Various simple mapping  ======================
 var settingsToObserve = {
   'accessibility.screenreader_quicknav_modes': {
