@@ -7530,6 +7530,18 @@ fi
 AC_SUBST(MOZ_PAY)
 
 dnl ========================================================
+dnl = Enable Remote Control Service
+dnl ========================================================
+MOZ_ARG_ENABLE_BOOL(remote-control-service,
+[  --enable-remote-control-service      Set compile flags necessary for Remote Control Service for B2G ],
+    MOZ_B2G_REMOTECONTROLSERVICE=1,
+    MOZ_B2G_REMOTECONTROLSERVICE= )
+if test -n "$MOZ_B2G_REMOTECONTROLSERVICE"; then
+   AC_DEFINE(MOZ_B2G_REMOTECONTROLSERVICE)
+fi
+AC_SUBST(MOZ_B2G_REMOTECONTROLSERVICE)
+
+dnl ========================================================
 dnl = Enable Browser Support for Activities
 dnl ========================================================
 if test -n "$MOZ_ACTIVITIES"; then
