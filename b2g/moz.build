@@ -12,3 +12,6 @@ if CONFIG['GAIADIR']:
     DIRS += ['gaia']
 
 DIRS += ['app']
+
+if CONFIG['MOZ_B2G_REMOTECONTROLSERVICE']:
+	DIRS += ['remotecontrol']
