@@ -1003,5 +1003,5 @@ bin/libfreebl_32int64_3.so
 @RESPATH@/components/utils.manifest
 
 [remotecontrol]
-@RESPATH@/remotecontrol/*
+@RESPATH@/res/remotecontrol/*
 

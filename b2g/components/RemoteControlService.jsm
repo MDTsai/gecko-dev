@@ -81,7 +81,6 @@ this.RemoteControlService = {
   _activeServerPort: null,
   _state: {},
   _sharedState: {},
-  _uuids: null, // record devices uuid : expire_timestamp pair
   _client_page_prepath: null,
   _static_request_blacklist: null,
   _server_script_prepath: null,
@@ -127,7 +126,7 @@ this.RemoteControlService = {
       handle: function(name, result) {
         switch (name) {
           case RC_SETTINGS_DEVICES:
-            RemoteControlService._uuids = JSON.parse (result);
+              RemoteControlService._uuids = result;
             break;
         }
       },
@@ -258,7 +257,7 @@ this.RemoteControlService = {
 
         switch (subject["key"]) {
           case  RC_SETTINGS_DEVICES:
-            this._uuids = JSON.parse(subject["value"]);
+            this._uuids = subject["value"];
             break;
         }
 
@@ -352,7 +351,7 @@ this.RemoteControlService = {
       }
     }
 
-    lock.set(RC_SETTINGS_DEVICES, JSON.stringify(uuids), null, null);
+    lock.set(RC_SETTINGS_DEVICES, uuids, null, null);
 
     return dic;
   },
@@ -375,7 +374,7 @@ this.RemoteControlService = {
       let lock = SettingsService.createLock();
 
       delete this._uuids[uuid];
-      lock.set(RC_SETTINGS_DEVICES, JSON.stringify(this._uuids), null, null);
+      lock.set(RC_SETTINGS_DEVICES, this._uuids, null, null);
     }
   },
 
@@ -383,7 +382,7 @@ this.RemoteControlService = {
     let lock = SettingsService.createLock();
 
     this._uuids = {};
-    lock.set(RC_SETTINGS_DEVICES, JSON.stringify(this._uuids), null, null);
+    lock.set(RC_SETTINGS_DEVICES, this._uuids, null, null);
   },
 
   _zeroFill: function(number, width) {
