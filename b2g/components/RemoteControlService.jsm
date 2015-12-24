@@ -559,6 +559,7 @@ this.RemoteControlService = {
       response.setHeader("Content-Type", "text/html;charset=utf-8", false);
     }
     response.setHeader("Content-Length", "" + count, false);
+    response.setHeader("X-Frame-Options", "DENY")
 
     try {
       if (offset !== 0) {
