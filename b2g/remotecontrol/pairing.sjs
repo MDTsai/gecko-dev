@@ -44,33 +44,80 @@ function handleRequest(request, response)
 
   // Split JSON header "message=" and parse event
   var event = JSON.parse(queryString.substring(8));
-  var savedPIN = getPIN();
   var reply = {};
 
-  DEBUG && debug ("Received PIN code: " + event.pincode);
+  if (event.secure !== undefined) {
+    // Send RSA public key SPKI in JSON { publickey : $SPKI$ }
+    reply.publickey = base64FromArrayBuffer(getRSAPublicKeySPKI());
+    response.write(JSON.stringify(reply));
+  } else if (event.pincode !== undefined) {
+    var wrappedSymmetricKey = base64ToArrayBuffer(event.wrappedSymmetricKey);
+    var encryptedPincode = base64ToArrayBuffer(event.pincode);
 
-  if (savedPIN === null) {
-    // PIN code expired, when 1) user doesn't send PIN code in 30 seconds or 2) other people pairied with the same PIN code
-    // Reply with { verified: false, reason: expired }
-    reply.verified = false;
-    reply.reason = "expired";
-  } else if (savedPIN == event.pincode) {
-    // PIN code is correct, clear current PIN code to prevent double pairing
-    // Notify System App dismiss PIN code in notification on screen
-    clearPIN();
-    SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { action: 'pin-destroyed' });
+    getSubtle().unwrapKey(
+      "raw",
+      wrappedSymmetricKey,
+      getPrivateKey(),
+      {
+        name: 'RSA-OAEP',
+        hash: { name: 'SHA-256' }
+      },
+      {
+        name: 'AES-GCM',
+        length: 256,
+      },
+      true,
+      ["encrypt", "decrypt"]
+    )
+    .then(function(key) {
+      getSubtle().decrypt(
+        {
+          name: 'AES-GCM',
+          iv: encryptedPincode.slice(0, 12)
+        },
+        key,
+        encryptedPincode.slice(12)
+      )
+      .then(function(decrypted){
+        // Need to use textDecoderLite.decode?
+      })
+      .catch(function(err){
+        debug("decrypt pincode fail:" + err);
+      });
+    })
+    .catch(function(err) {
+      debug("unwrap key fail:" + err);
+    });
 
-    // Reply with { verified: true, uuid: <UUID> }
-    // Client get the new UUID, connect using Cookie with UUID to get remote control page
-    var newUUID = generateUUID();
-    var uuid;
-    reply.verified = true;
-    reply.uuid = newUUID;
-  } else {
-    // PIN code incorrect, reply with { verified: false, reason: invalid }
-    reply.verified = false;
-    reply.reason = "invalid";
+    /*
+    DEBUG && debug ("Received PIN code: " + event.pincode);
+    
+    var savedPIN = getPIN();
+
+    if (savedPIN === null) {
+      // PIN code expired, when 1) user doesn't send PIN code in 30 seconds or 2) other people pairied with the same PIN code
+      // Reply with { verified: false, reason: expired }
+      reply.verified = false;
+      reply.reason = "expired";
+    } else if (savedPIN == event.pincode) {
+      // PIN code is correct, clear current PIN code to prevent double pairing
+      // Notify System App dismiss PIN code in notification on screen
+      clearPIN();
+      SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { action: 'pin-destroyed' });
+
+      // Reply with { verified: true, uuid: <UUID> }
+      // Client get the new UUID, connect using Cookie with UUID to get remote control page
+      var newUUID = generateUUID();
+      var uuid;
+      reply.verified = true;
+      reply.uuid = newUUID;
+    } else {
+      // PIN code incorrect, reply with { verified: false, reason: invalid }
+      reply.verified = false;
+      reply.reason = "invalid";
+    }
+
+    response.write(JSON.stringify(reply));
+    */
   }
-
-  response.write(JSON.stringify(reply));
 }

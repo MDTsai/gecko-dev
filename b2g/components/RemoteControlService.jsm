@@ -27,7 +27,7 @@
 "use strict";
 
 /* static functions */
-const DEBUG = false;
+const DEBUG = true;
 const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
@@ -89,6 +89,11 @@ this.RemoteControlService = {
   _pin: null,
   _uuids: null, // record devices uuid : expire_timestamp pair
   _pairingRequired: false,
+  // Secure connection
+  _subtle: null,
+  _rsaPublicKey: null,
+  _rsaPublicKeySPKI: null,
+  _rsaPrivateKey: null,
 
   init: function() {
     DEBUG && debug("init");
@@ -139,6 +144,39 @@ this.RemoteControlService = {
 
     let lock = SettingsService.createLock();
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
+
+    // Restore existing RSA key
+    
+    // Generate new RSA key
+    let type = 'navigator:browser';
+    let window = Services.wm.getMostRecentWindow(type);      
+    this._subtle = window.crypto.subtle;
+
+    var option = {
+      name: 'RSA-OAEP',
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
+      hash: { name: 'SHA-256' }
+    };
+
+    this._subtle.generateKey(
+      option,
+      true,
+      ['wrapKey', 'unwrapKey']
+    ).then(function(key) {
+      RemoteControlService._rsaPublicKey = key.publicKey;
+      RemoteControlService._rsaPrivateKey = key.privateKey;
+      RemoteControlService._subtle.exportKey('spki', key.publicKey).then(function(keydata) {
+        RemoteControlService._rsaPublicKeySPKI = keydata;
+        //resolve(keydata);
+      }).catch(function(err) {
+        //reject(err);
+        debug(err);
+      });
+    }).catch(function(err) {
+      //reject(err);
+      debug(err);
+    });
   },
 
   // Start http server and register observers.
@@ -530,6 +568,7 @@ this.RemoteControlService = {
           pin = this._generatePIN();
           // Show notification on screen
           SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { pincode: pin, action: 'pin-created' });
+          debug("call pin-created");
         }
         return "/pairing.html";
       }
@@ -664,6 +703,22 @@ this.RemoteControlService = {
       s.importFunction(function isPairingRequired() {
         return self._pairingRequired;
       });
+      s.importFunction(function base64ToArrayBuffer(base64) {
+        return self._base64ToArrayBuffer(base64);
+      });
+      s.importFunction(function base64FromArrayBuffer(array_buffer) {
+        return self._base64FromArrayBuffer(array_buffer);
+      });
+      s.importFunction(function getSubtle() {
+        return self._subtle;
+      })
+      s.importFunction(function getRSAPublicKeySPKI() {
+        return self._rsaPublicKeySPKI;
+      });
+      s.importFunction(function getPrivateKey() {
+        return self._rsaPrivateKey;
+      })
+
 
       try {
         // Alas, the line number in errors dumped to console when calling the
@@ -691,6 +746,27 @@ this.RemoteControlService = {
     } finally {
       fis.close();
     }
+  },
+
+  _base64ToArrayBuffer: function(base64) {
+    var binary_string = atob(base64);
+    var len = binary_string.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) {
+      bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
+  },
+
+  _base64FromArrayBuffer: function(arrayBuffer) {
+
+    var binary = '';
+    var bytes = new Uint8Array(arrayBuffer);
+    var len = bytes.byteLength;
+    for (var i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i])
+    }
+    return btoa(binary);
   },
 };
 
