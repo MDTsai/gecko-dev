@@ -1145,7 +1145,7 @@ pref("remotecontrol.service.pairing_required", false);
 
 // Remote Control URL, for server script (sjs) file
 pref("remotecontrol.server_script.prepath", "resource://gre/res/remotecontrol");
-pref("remotecontrol.server_script.whitelist", "/client.sjs,/pairing.sjs");
+pref("remotecontrol.server_script.whitelist", "/client.sjs,/pairing.sjs,/secure.sjs");
 
 pref("remotecontrol.default_server_port", 8080);
 // Remote Control UUID expire time, 90 days

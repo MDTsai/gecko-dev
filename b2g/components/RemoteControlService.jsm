@@ -27,7 +27,7 @@
 "use strict";
 
 /* static functions */
-const DEBUG = false;
+const DEBUG = true;
 const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
@@ -87,14 +87,25 @@ this.RemoteControlService = {
   _default_port: null,
   _UUID_expire_days: null,
   _pin: null,
-  _uuids: null, // record devices uuid : expire_timestamp pair
+  _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, paired: <boolean>, symmetricKey: <symmetric_key> }
+  _symmetricKeys: null,
   _pairingRequired: false,
+  // Secure connection
+  _crypto: null,
+  _subtle: null,
+  _rsaPublicKey: null,
+  _rsaPublicKeySPKI: null,
+  _rsaPrivateKey: null,
+  _secureTickets: null, // record key as ticket number, value as { status: <status>, UUID: <UUID> }
+  // PIN code pairing
+  _pairingTickets: null, // record key as ticket number, value as { done: <boolean>, verified: <verified>, reason: <reason> }
+  // Control event process
+  _eventReplies: null, // record key as UUID, value as <boolean>
 
   init: function() {
     DEBUG && debug("init");
 
     this._httpServer = new HttpServer();
-    this._uuids = {};
 
     // Initial member variables from Gecko preferences
     this._client_page_prepath = Services.prefs.getCharPref("remotecontrol.client_page.prepath");
@@ -120,6 +131,14 @@ this.RemoteControlService = {
       RemoteControlService._handleRequest(request, response);
     });
 
+
+    // Prepare crypto and subtle
+    this._crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
+    this._subtle = this._crypto.subtle;
+
+    this._uuids = {};
+    this._symmetricKeys = {};
+
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
       handle: function(name, result) {
@@ -131,6 +150,8 @@ this.RemoteControlService = {
             } else {
               RemoteControlService._uuids = result;
             }
+
+            RemoteControlService._restoreSymmetricKeys();
             break;
         }
       },
@@ -139,6 +160,18 @@ this.RemoteControlService = {
 
     let lock = SettingsService.createLock();
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
+
+    // Restore existing RSA keys or generate new RSA keys
+    if (Services.prefs.prefHasUserValue("remotecontrol.service.rsa_privatekey_pkcs8") &&
+      Services.prefs.prefHasUserValue("remotecontrol.service.rsa_publickey_spki")) {
+      this._restoreRSAKeys();
+    } else {
+      this._generateRSAKeys();
+    }
+
+    this._secureTickets = new Map();
+    this._pairingTickets = new Map();
+    this._eventReplies = new Map();
   },
 
   // Start http server and register observers.
@@ -328,6 +361,9 @@ this.RemoteControlService = {
 
         if (subject["key"] == RC_SETTINGS_DEVICES) {
           this._uuids = subject.value;
+          // If there is changes from _uuids, re-export symmetric keys
+          this._symmetricKeys = {};
+          RemoteControlService._restoreSymmetricKeys();
         }
 
         break;
@@ -405,34 +441,76 @@ this.RemoteControlService = {
   },
 
   // Generate UUID and expire timestamp
-  _generateUUID: function() {
-    let uuidString = UUIDGenerator.generateUUID().toString();
-    let timeStamp = ((new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
-    let lock = SettingsService.createLock();
-    let uuids = this._uuids;
+  _generateUUID: function(key) {
+    var symmetricKey = key;
+    var uuidString = UUIDGenerator.generateUUID().toString();
+    var uuids = this._uuids;
 
-    uuids[uuidString] = timeStamp;
+    let timeStamp = (new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000;
 
     // Check and remove expired UUID
+    let now = new Date().getTime();
     for (let uuid in uuids) {
-      let now = new Date().getTime();
-      if (now > parseInt(uuids[uuid])) {
+      let data = uuids[uuid];
+      if (now > data.timeStamp) {
         delete this._uuids[uuid];
       }
     }
 
-    lock.set(RC_SETTINGS_DEVICES, uuids, null);
+    // Export key received
+    this._subtle.exportKey(
+      "jwk",
+      symmetricKey
+    ).then(function(keydata) {
+      let lock = SettingsService.createLock();
+      uuids[uuidString] = { timeStamp: timeStamp, paired: false, symmetricKey: JSON.stringify(keydata) };
 
-    return uuidString;
+      let settingsCallback = {
+        handle: function(name, result) {
+          debug("set uuids to MozSettings done");
+        },
+        handleError: function(message) {
+          debug("set uuids to MozSettings fail:" + message);
+        },
+      };
+
+      lock.set(RC_SETTINGS_DEVICES, uuids, settingsCallback);
+    }).catch(function(err) {
+      debug("export symmetric key err:" + err);
+    });
+
+    // Store symmetricKeys for runtime
+    this._symmetricKeys[uuidString] = symmetricKey;
+
+    var self = this;
+    return new Promise(function(aResolve, aReject) {
+      var randomValues = new Uint8Array(12);
+      self._subtle.encrypt(
+        {
+          name: 'AES-GCM',
+          iv: self._crypto.getRandomValues(randomValues)
+        },
+        symmetricKey,
+        self._encodeText(uuidString)
+      ).then(function(encryptedUUID){
+        var result = new Uint8Array(12 + encryptedUUID.byteLength);
+        result.set(randomValues, 0);
+        result.set(new Uint8Array(encryptedUUID), 12);
+        aResolve(self._base64FromArrayBuffer(result));
+      }).catch(function(err){
+        aReject(err);
+      });
+    });
   },
 
   _isValidUUID: function(uuid) {
     return (uuid in this._uuids);
   },
 
-  _updateUUID: function(uuid, timestamp) {
+  _updateUUID: function(uuid, paired) {
     if (this._isValidUUID(uuid)) {
-      this._uuids[uuid] = timestamp;
+      let data = this._uuids[uuid];
+      data.paired = paired;
     }
   },
 
@@ -450,6 +528,16 @@ this.RemoteControlService = {
 
     this._uuids = {};
     lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
+  },
+
+  _getSymmetricKeyFromUUID: function(UUID) {
+    return this._symmetricKeys[UUID];
+  },
+
+  _getPairedFromUUID: function(UUID) {
+    let data = this._uuids[UUID];
+
+    return data.paired;
   },
 
   _zeroFill: function(number, width) {
@@ -513,16 +601,50 @@ this.RemoteControlService = {
     }
   },
 
+  _getUUIDFromCookie: function(request) {
+    // Split cookie from header, split cookie values by ";"
+    var cookies = request.getHeader("Cookie").split(";");
+
+    for (let i = 0; i < cookies.length; i++) {
+      let cookie = decodeURIComponent(cookies[i]);
+      let cookieName = cookie.substr(0, cookie.indexOf("="));
+      let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
+
+      cookieName = cookieName.replace(/^\s+|\s+$/g, "");
+      // If cookie name is "uuid" and value is a valid UUID stored, return the value
+      if (cookieName == "uuid") {
+        return cookieValue;
+      }
+    }
+
+    return null;
+  },
+
+  _hasValidUUIDInCookie: function(request) {
+    // Return false if there is no cookie in header
+    if (!request.hasHeader("Cookie")) {
+      return false;
+    }
+
+    // If UUID is not null and it's a valid UUID, return true
+    let uuid = this._getUUIDFromCookie(request);
+    if (uuid !== null && this._isValidUUID(uuid)) {
+      return true;
+    }
+
+    return false;
+  },
+
   _transferRequestToPath: function(request) {
     if (request.path == "/") {
       // If it's not need to pairing or there is cookie with valid UUID
       // Send client.html to the user directly to use RemoteControl
-      // When check cookie, remove "uuid=" from first 5 character from cookie to get correct UUID
       // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
       // Send pairing.html to start pairing
-      if (this._pairingRequired == false ||
-          (request.hasHeader("Cookie") &&
-            this._isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5)))) {
+      if (!this._hasValidUUIDInCookie(request)) {
+        debug("secure.html");
+        return "/secure.html";
+      } else if (this._pairingRequired == false || this._getPairedFromUUID(this._getUUIDFromCookie(request))) {
         return "/client.html";
       } else {
         var pin = this._getPIN();
@@ -530,6 +652,7 @@ this.RemoteControlService = {
           pin = this._generatePIN();
           // Show notification on screen
           SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { pincode: pin, action: 'pin-created' });
+          debug("call pin-created");
         }
         return "/pairing.html";
       }
@@ -655,15 +778,69 @@ this.RemoteControlService = {
       s.importFunction(function clearPIN() {
         self._clearPIN();
       });
-      s.importFunction(function generateUUID() {
-        return self._generateUUID();
+      s.importFunction(function generateUUID(key) {
+        return self._generateUUID(key);
       });
       s.importFunction(function isValidUUID(uuid) {
         return self._isValidUUID(uuid);
       });
+      s.importFunction(function updateUUID(uuid, paired) {
+        return self._updateUUID(uuid, paired);
+      })
       s.importFunction(function isPairingRequired() {
         return self._pairingRequired;
       });
+       s.importFunction(function hasValidUUIDInCookie(httpRequest) {
+        return self._hasValidUUIDInCookie(httpRequest);
+      });
+      s.importFunction(function base64ToArrayBuffer(base64) {
+        return self._base64ToArrayBuffer(base64);
+      });
+      s.importFunction(function base64FromArrayBuffer(array_buffer) {
+        return self._base64FromArrayBuffer(array_buffer);
+      });
+      s.importFunction(function getSubtle() {
+        return self._subtle;
+      })
+      s.importFunction(function getRSAPublicKeySPKI() {
+        return self._rsaPublicKeySPKI;
+      });
+      s.importFunction(function getRSAPrivateKey() {
+        return self._rsaPrivateKey;
+      })
+      s.importFunction(function generateSecureTicket() {
+        return self._generateSecureTicket();
+      })
+      s.importFunction(function getSecureTicketStatus(ticket) {
+        return self._getSecureTicketStatus(ticket);
+      })
+      s.importFunction(function setSecureTicketStatus(ticket, status, encryptedBase64UUID) {
+        return self._setSecureTicketStatus(ticket, status, encryptedBase64UUID);
+      })
+      s.importFunction(function getEncryptedUUID(ticket) {
+        return self._getEncryptedUUID(ticket);
+      })
+      s.importFunction(function getUUIDFromCookie(request) {
+        return self._getUUIDFromCookie(request);
+      })
+      s.importFunction(function getSymmetricKeyFromUUID(UUID) {
+        return self._getSymmetricKeyFromUUID(UUID);
+      })
+      s.importFunction(function generatePairingTicket() {
+        return self._generatePairingTicket();
+      })
+      s.importFunction(function getPairingTicketStatus(ticket) {
+        return self._getPairingTicketStatus(ticket);
+      })
+      s.importFunction(function decodeText(buf, start, end) {
+        return self._decodeText(buf, start, end);
+      })
+      s.importFunction(function setEventReply(UUID, verified) {
+        return self._setEventReply(UUID, verified);
+      })
+      s.importFunction(function getEventReply(UUID) {
+        return self._getEventReply(UUID);
+      })
 
       try {
         // Alas, the line number in errors dumped to console when calling the
@@ -691,6 +868,304 @@ this.RemoteControlService = {
     } finally {
       fis.close();
     }
+  },
+
+  _stringToArrayBuffer: function(str) {
+    var buf = new ArrayBuffer(str.length * 2); // 2 bytes for each char
+    var bufView = new Uint16Array(buf);
+    for (var i = 0, strLen = str.length; i < strLen; i++) {
+      bufView[i] = str.charCodeAt(i);
+    }
+    return buf;
+  },
+
+  _encodeText: function(string, units) {
+    units = units || Infinity
+    var codePoint
+    var length = string.length
+    var leadSurrogate = null
+    var bytes = []
+    var i = 0
+
+    for (; i < length; i++) {
+      codePoint = string.charCodeAt(i)
+
+      // is surrogate component
+      if (codePoint > 0xD7FF && codePoint < 0xE000) {
+        // last char was a lead
+        if (leadSurrogate) {
+          // 2 leads in a row
+          if (codePoint < 0xDC00) {
+            if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+            leadSurrogate = codePoint
+            continue
+          } else {
+            // valid surrogate pair
+            codePoint = leadSurrogate - 0xD800 << 10 | codePoint - 0xDC00 | 0x10000
+            leadSurrogate = null
+          }
+        } else {
+          // no lead yet
+
+          if (codePoint > 0xDBFF) {
+            // unexpected trail
+            if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+            continue
+          } else if (i + 1 === length) {
+            // unpaired lead
+            if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+            continue
+          } else {
+            // valid lead
+            leadSurrogate = codePoint
+            continue
+          }
+        }
+      } else if (leadSurrogate) {
+        // valid bmp char, but last char was a lead
+        if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+        leadSurrogate = null
+      }
+
+      // encode utf8
+      if (codePoint < 0x80) {
+        if ((units -= 1) < 0) break
+        bytes.push(codePoint)
+      } else if (codePoint < 0x800) {
+        if ((units -= 2) < 0) break
+        bytes.push(
+          codePoint >> 0x6 | 0xC0,
+          codePoint & 0x3F | 0x80
+        )
+      } else if (codePoint < 0x10000) {
+        if ((units -= 3) < 0) break
+        bytes.push(
+          codePoint >> 0xC | 0xE0,
+          codePoint >> 0x6 & 0x3F | 0x80,
+          codePoint & 0x3F | 0x80
+        )
+      } else if (codePoint < 0x200000) {
+        if ((units -= 4) < 0) break
+        bytes.push(
+          codePoint >> 0x12 | 0xF0,
+          codePoint >> 0xC & 0x3F | 0x80,
+          codePoint >> 0x6 & 0x3F | 0x80,
+          codePoint & 0x3F | 0x80
+        )
+      } else {
+        throw new Error('Invalid code point')
+      }
+    }
+
+    return new Uint8Array(bytes);
+  },
+
+  _decodeUtf8Char: function(str) {
+    try {
+      return decodeURIComponent(str)
+    } catch (err) {
+      return String.fromCharCode(0xFFFD) // UTF 8 invalid char
+    }
+  },
+
+  _decodeText: function(buf, start, end) {
+    var res = ''
+    var tmp = ''
+    end = Math.min(buf.length, end || Infinity)
+    start = start || 0;
+
+    for (var i = start; i < end; i++) {
+      if (buf[i] <= 0x7F) {
+        res += this._decodeUtf8Char(tmp) + String.fromCharCode(buf[i])
+        tmp = ''
+      } else {
+        tmp += '%' + buf[i].toString(16)
+      }
+    }
+
+    return res + this._decodeUtf8Char(tmp)
+  },
+
+  _base64ToArrayBuffer: function(base64) {
+    var binary_string = atob(base64);
+    var len = binary_string.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) {
+      bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
+  },
+
+  _base64FromArrayBuffer: function(arrayBuffer) {
+    var binary = '';
+    var bytes = new Uint8Array(arrayBuffer);
+    var len = bytes.byteLength;
+    for (var i = 0; i < len; i++) {
+      binary += String.fromCharCode(bytes[i])
+    }
+    return btoa(binary);
+  },
+
+  _restoreRSAKeys: function() {
+    debug("_restoreRSAKeys");
+
+    RemoteControlService._rsaPublicKeySPKI = RemoteControlService._base64ToArrayBuffer(
+      Services.prefs.getCharPref("remotecontrol.service.rsa_publickey_spki"));
+
+    this._subtle.importKey(
+      "spki",
+      RemoteControlService._rsaPublicKeySPKI,
+      {
+        name: "RSA-OAEP",
+        hash: {name: "SHA-256"},
+      },
+      true, // key is extractable for client side
+      ["wrapKey"]
+    ).then(function(publicKey) {
+      debug("import RSA public key done");
+      RemoteControlService._rsaPublicKey = publicKey;
+    }).catch(function(err){
+      debug("import RSA public key error:" + err);
+    });
+
+    this._subtle.importKey(
+      "pkcs8",
+      RemoteControlService._base64ToArrayBuffer(Services.prefs.getCharPref("remotecontrol.service.rsa_privatekey_pkcs8")),
+      {
+        name: "RSA-OAEP",
+        hash: {name: "SHA-256"},
+      },
+      false, // key is not extractable
+      ["unwrapKey"]
+    ).then(function(privateKey) {
+      debug("import RSA private key done");
+      RemoteControlService._rsaPrivateKey = privateKey;
+    }).catch(function(err) {
+      debug("import RSA private key error:" + err);
+    });
+  },
+
+  _generateRSAKeys: function() {
+    debug("_generateRSAKeys");
+
+    var option = {
+      name: "RSA-OAEP",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
+      hash: { name: "SHA-256" }
+    };
+
+    this._subtle.generateKey(
+      option,
+      true,
+      ["wrapKey", "unwrapKey"]
+    ).then(function(key) {
+      debug("generate RSA key done");
+      RemoteControlService._rsaPublicKey = key.publicKey;
+      RemoteControlService._rsaPrivateKey = key.privateKey;
+
+      RemoteControlService._subtle.exportKey("spki", key.publicKey).then(function(keydata) {
+        debug("export public key done");
+        RemoteControlService._rsaPublicKeySPKI = keydata;
+        Services.prefs.setCharPref("remotecontrol.service.rsa_publickey_spki", RemoteControlService._base64FromArrayBuffer(keydata));
+      }).catch(function(err) {
+        debug("export RSA public key error: " + err);
+      });
+
+      RemoteControlService._subtle.exportKey("pkcs8", key.privateKey).then(function(keydata) {
+        debug("export private key done");
+        Services.prefs.setCharPref("remotecontrol.service.rsa_privatekey_pkcs8", RemoteControlService._base64FromArrayBuffer(keydata));
+      }).catch(function(err) {
+        debug("export RSA private key error: " + err);
+      });
+
+    }).catch(function(err) {
+      debug("generate RSA key error: " + err);
+    });
+  },
+
+  _restoreSymmetricKeys: function() {
+    debug("_restoreSymmetricKeys");
+
+    for(var prop in this._uuids) {
+      let uuid = prop;
+      var data = this._uuids[uuid];
+
+      this._subtle.importKey(
+        "jwk",
+        JSON.parse(data.symmetricKey),
+        {
+          name: "AES-GCM",
+        },
+        true,
+        ["encrypt", "decrypt"]
+      ).then(function(key) {
+        RemoteControlService._symmetricKeys[uuid] = key;
+      }).catch(function(err) {
+        debug("import symmetric key err:" + err);
+      });
+    }
+  },
+
+  _generateSecureTicket: function() {
+    let timestamp = (new Date().getTime()).toString();
+
+    this._secureTickets.set(timestamp, { status : 0 });
+
+    return timestamp;
+  },
+
+  _getSecureTicketStatus: function(ticket) {
+    if (this._secureTickets.has(ticket)) {
+      var value = this._secureTickets.get(ticket);
+
+      return value.status;
+    }
+    return 2;
+  },
+
+  _setSecureTicketStatus: function(ticket, status, encryptedBase64UUID) {
+    if (this._secureTickets.has(ticket)) {
+      var value = this._secureTickets.get(ticket);
+
+      value.status = status;
+      if (encryptedBase64UUID !== null) {
+        value.UUID = encryptedBase64UUID;
+      }
+    }
+  },
+
+  _getEncryptedUUID: function(ticket) {
+    if (this._secureTickets.has(ticket)) {
+      return this._secureTickets.get(ticket).UUID;
+    }
+
+    return undefined;
+  },
+
+  _generatePairingTicket: function() {
+    let timestamp = (new Date().getTime()).toString();
+
+    this._pairingTickets.set(timestamp, { done: false });
+
+    return timestamp;
+  },
+
+  _getPairingTicketStatus: function(ticket) {
+    return this._pairingTickets.get(ticket);
+  },
+
+  _setEventReply: function(UUID, verified) {
+    this._eventReplies.set(UUID, verified);
+  },
+
+  _getEventReply: function(UUID) {
+    if (this._eventReplies.has(UUID)) {
+      return this._eventReplies.get(UUID);
+    }
+
+    // If there is no reply for this UUID, means it's first event, assume it's correct event and return true
+    return true;
   },
 };
 

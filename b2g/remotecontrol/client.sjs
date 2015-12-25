@@ -461,51 +461,68 @@ function handleRemoteInputEvent(detail)
 // queryString format: message={ type: <event type>, detail: { <event detail>} }
 function handleRequest(request, response)
 {
-  var requestIsValid = (isPairingRequired() == false ||
-                         (request.hasHeader("Cookie") &&
-                           isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5))));
+  let UUID = getUUIDFromCookie(request);
+  var reply = {};
 
-  // client.sjs handles the event only when the request is valid.
-  if (requestIsValid) {
+  // client.sjs handles the event only when the request with valid UUID
+  if (UUID !== null) {
+    var symmetricKey = getSymmetricKeyFromUUID(UUID);
     var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
+    // Split header "message=" and get encrypted event
+    var encryptedEvent = base64ToArrayBuffer(queryString.substring(8));
+    getSubtle().decrypt(
+      {
+        name: 'AES-GCM',
+        iv: encryptedEvent.slice(0, 12)
+      },
+      symmetricKey,
+      encryptedEvent.slice(12)
+    ).then(function(decrypted){
+      var event = JSON.parse(decodeText(new Uint8Array(decrypted)));
+      setEventReply(UUID, true);
 
-    response.setHeader("Content-Type", "text/html", false);
+      switch (event.type) {
+        case "keypress":
+          handleKeyboardEvent(event.detail);
+          break;
+        case "touchstart":
+        case "touchmove":
+        case "touchend":
+          DEBUG && debug(JSON.stringify(event));
+          handleTouchEvent(event);
+          break;
+        case "scrollmove":
+        case "scrollend":
+          DEBUG && debug(JSON.stringify(event));
+          handleWheelEvent(event);
+          break;
+        case "click":
+        case "dblclick":
+          DEBUG && debug(JSON.stringify(event));
+          handleClickEvent(event);
+          break;
+        case "textinput":
+          handleRemoteTextInput(event.detail);
+          break;
+        case "custom":
+          handleCustomEvent(event);
+          break;
+        default:
+          // Not supported event, next reply will be false
+          setEventReply(UUID, false);
+          break;
+      }
+    }).catch(function(err){
+      setEventReply(UUID, false);
+    });
 
-    // Split JSON header "message=" and parse event
-    var event = JSON.parse(queryString.substring(8));
-    var reply = {};
-
-    switch (event.type) {
-      case "keypress":
-        handleKeyboardEvent(event.detail);
-        break;
-      case "touchstart":
-      case "touchmove":
-      case "touchend":
-        DEBUG && debug(JSON.stringify(event));
-        handleTouchEvent(event);
-        break;
-      case "scrollmove":
-      case "scrollend":
-        DEBUG && debug(JSON.stringify(event));
-        handleWheelEvent(event);
-        break;
-      case "click":
-      case "dblclick":
-        DEBUG && debug(JSON.stringify(event));
-        handleClickEvent(event);
-        break;
-      case "textinput":
-        handleRemoteTextInput(event.detail);
-        break;
-      case "custom":
-        handleCustomEvent(event);
-        break;
-    }
+    reply.verified = getEventReply(UUID);
+  } else {
+    reply.verified = false;
   }
 
-  // Send { verified: true } if: 1) No pairing required or 2) already paired UUID is not expired.
-  // client should reload and get pairing.html to pairing again
-  reply.verified = requestIsValid;
+  response.setHeader("Content-Type", "text/html", false);
+  // Send { verified: true } if previous event is successful processed.
+  // client should reload and go through key exchange, get proper event again
   response.write(JSON.stringify(reply));
 }
