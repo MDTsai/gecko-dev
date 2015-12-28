@@ -461,9 +461,7 @@ function handleRemoteTextInput(detail)
 // queryString format: message={ type: <event type>, detail: { <event detail>} }
 function handleRequest(request, response)
 {
-  var requestIsValid = (isPairingRequired() == false ||
-                         (request.hasHeader("Cookie") &&
-                           isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5))));
+  var requestIsValid = (isPairingRequired() == false || hasValidUUIDInCookie(request));
 
   // client.sjs handles the event only when the request is valid.
   if (requestIsValid) {

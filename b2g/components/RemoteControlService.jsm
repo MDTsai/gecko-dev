@@ -513,16 +513,36 @@ this.RemoteControlService = {
     }
   },
 
+  _hasValidUUIDInCookie: function(request) {
+    // Return false if there is no cookie in header
+    if (!request.hasHeader("Cookie")) {
+      return false;
+    }
+
+    // Split cookie from header
+    // If cookie name is "uuid" and value is a valid UUID stored, return true
+    var cookies = request.getHeader("Cookie").split(";");
+    for (let i = 0; i < cookies.length; i++) {
+      let cookie = decodeURIComponent(cookies[i]);
+      let cookieName = cookie.substr(0, cookie.indexOf("="));
+      let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
+
+      cookieName = cookieName.replace(/^\s+|\s+$/g, "");
+      if (cookieName == "uuid" && this._isValidUUID(cookieValue)) {
+        return true;
+      }
+    }
+
+    return false;
+  },
+
   _transferRequestToPath: function(request) {
     if (request.path == "/") {
       // If it's not need to pairing or there is cookie with valid UUID
       // Send client.html to the user directly to use RemoteControl
-      // When check cookie, remove "uuid=" from first 5 character from cookie to get correct UUID
       // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
       // Send pairing.html to start pairing
-      if (this._pairingRequired == false ||
-          (request.hasHeader("Cookie") &&
-            this._isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5)))) {
+      if (this._pairingRequired == false || this._hasValidUUIDInCookie(request)) {
         return "/client.html";
       } else {
         var pin = this._getPIN();
@@ -662,6 +682,9 @@ this.RemoteControlService = {
       });
       s.importFunction(function isPairingRequired() {
         return self._pairingRequired;
+      });
+      s.importFunction(function hasValidUUIDInCookie(httpRequest) {
+        return self._hasValidUUIDInCookie(httpRequest);
       });
 
       try {
