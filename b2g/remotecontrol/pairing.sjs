@@ -36,6 +36,10 @@ function debug(message)
   dump("pairing.sjs: " + message + '\n');
 }
 
+function arrayBufferToString(buf) {
+  return String.fromCharCode.apply(null, new Uint8Array(buf));
+}
+
 // Entry point when receive a HTTP request from user, RemoteControlService.jsm
 // queryString format: message={ pincode: <pincode> }
 function handleRequest(request, response)
@@ -79,7 +83,36 @@ function handleRequest(request, response)
         encryptedPincode.slice(12)
       )
       .then(function(decrypted){
-        // Need to use textDecoderLite.decode?
+        // Simple convert array buffer to number string
+        let pincode = arrayBufferToString(decrypted);
+        DEBUG && debug ("Decrypted PIN code: " + pincode);
+    
+        var savedPIN = getPIN();
+
+        if (savedPIN === null) {
+          // PIN code expired, when 1) user doesn't send PIN code in 30 seconds or 2) other people pairied with the same PIN code
+          // Reply with { verified: false, reason: expired }
+          reply.verified = false;
+          reply.reason = "expired";
+        } else if (savedPIN == pincode) {
+          // PIN code is correct, clear current PIN code to prevent double pairing
+          // Notify System App dismiss PIN code in notification on screen
+          clearPIN();
+          SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { action: 'pin-destroyed' });
+
+          // Reply with { verified: true, uuid: <UUID> }
+          // Client get the new UUID, connect using Cookie with UUID to get remote control page
+          var newUUID = generateUUID();
+          var uuid;
+          reply.verified = true;
+          reply.uuid = newUUID;
+        } else {
+          // PIN code incorrect, reply with { verified: false, reason: invalid }
+          reply.verified = false;
+          reply.reason = "invalid";
+        }
+
+        response.write(JSON.stringify(reply));
       })
       .catch(function(err){
         debug("decrypt pincode fail:" + err);
@@ -88,36 +121,5 @@ function handleRequest(request, response)
     .catch(function(err) {
       debug("unwrap key fail:" + err);
     });
-
-    /*
-    DEBUG && debug ("Received PIN code: " + event.pincode);
-    
-    var savedPIN = getPIN();
-
-    if (savedPIN === null) {
-      // PIN code expired, when 1) user doesn't send PIN code in 30 seconds or 2) other people pairied with the same PIN code
-      // Reply with { verified: false, reason: expired }
-      reply.verified = false;
-      reply.reason = "expired";
-    } else if (savedPIN == event.pincode) {
-      // PIN code is correct, clear current PIN code to prevent double pairing
-      // Notify System App dismiss PIN code in notification on screen
-      clearPIN();
-      SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { action: 'pin-destroyed' });
-
-      // Reply with { verified: true, uuid: <UUID> }
-      // Client get the new UUID, connect using Cookie with UUID to get remote control page
-      var newUUID = generateUUID();
-      var uuid;
-      reply.verified = true;
-      reply.uuid = newUUID;
-    } else {
-      // PIN code incorrect, reply with { verified: false, reason: invalid }
-      reply.verified = false;
-      reply.reason = "invalid";
-    }
-
-    response.write(JSON.stringify(reply));
-    */
   }
 }
