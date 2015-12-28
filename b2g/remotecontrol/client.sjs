@@ -419,7 +419,7 @@ function handleKeyboardEvent(keyCodeName)
 //     clear: <whether to clear the entire string in the current focused input field, boolean>,
 //     string: <new string to append, string>,
 //     keycode: <a specified key to be pressed after the string inputted, integer>  } }
-function handleRemoteInputEvent(detail)
+function handleRemoteTextInput(detail)
 {
   DEBUG && debug('input: ' + JSON.stringify(detail));
 
