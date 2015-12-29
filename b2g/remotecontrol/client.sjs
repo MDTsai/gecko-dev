@@ -415,7 +415,7 @@ function handleKeyboardEvent(keyCodeName)
 
 // Receive from client page and paste a string to focused input field, done by Gaia TV system app
 // Gaia TV system app bug: https://bugzilla.mozilla.org/show_bug.cgi?id=1203045
-// Received event format { type: 'input', detail: { 
+// Received event format { type: 'input', detail: {
 //     clear: <whether to clear the entire string in the current focused input field, boolean>,
 //     string: <new string to append, string>,
 //     keycode: <a specified key to be pressed after the string inputted, integer>  } }

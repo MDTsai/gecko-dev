@@ -6,7 +6,7 @@
 
 CONFIGURE_SUBST_FILES += ['installer/Makefile']
 
-DIRS += ['chrome', 'components', 'locales', 'remotecontrol']
+DIRS += ['chrome', 'components', 'locales']
 
 if CONFIG['OS_ARCH'] == 'WINNT':
     DIRS += ['../xulrunner/tools/redit']
@@ -15,3 +15,6 @@ if CONFIG['GAIADIR']:
     DIRS += ['gaia']
 
 DIRS += ['app']
+
+if CONFIG['MOZ_B2G_REMOTECONTROLSERVICE']:
+	DIRS += ['remotecontrol']
