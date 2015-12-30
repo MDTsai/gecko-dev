@@ -145,38 +145,16 @@ this.RemoteControlService = {
     let lock = SettingsService.createLock();
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
 
-    // Restore existing RSA key
-    
-    // Generate new RSA key
-    let type = 'navigator:browser';
-    let window = Services.wm.getMostRecentWindow(type);      
-    this._subtle = window.crypto.subtle;
+    // Prepare subtle crypto
+    this._subtle = Services.wm.getMostRecentWindow("navigator:browser").crypto.subtle;
 
-    var option = {
-      name: 'RSA-OAEP',
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
-      hash: { name: 'SHA-256' }
-    };
-
-    this._subtle.generateKey(
-      option,
-      true,
-      ['wrapKey', 'unwrapKey']
-    ).then(function(key) {
-      RemoteControlService._rsaPublicKey = key.publicKey;
-      RemoteControlService._rsaPrivateKey = key.privateKey;
-      RemoteControlService._subtle.exportKey('spki', key.publicKey).then(function(keydata) {
-        RemoteControlService._rsaPublicKeySPKI = keydata;
-        //resolve(keydata);
-      }).catch(function(err) {
-        //reject(err);
-        debug(err);
-      });
-    }).catch(function(err) {
-      //reject(err);
-      debug(err);
-    });
+    // Restore existing RSA keys or generate new RSA keys
+    if (Services.prefs.prefHasUserValue("remotecontrol.service.rsa_privatekey_pkcs8") &&
+      Services.prefs.prefHasUserValue("remotecontrol.service.rsa_publickey_spki")) {
+      this._restoreRSAKeys();
+    } else {
+      this._generateRSAKeys();
+    }
   },
 
   // Start http server and register observers.
@@ -719,7 +697,6 @@ this.RemoteControlService = {
         return self._rsaPrivateKey;
       })
 
-
       try {
         // Alas, the line number in errors dumped to console when calling the
         // request handler is simply an offset from where we load the SJS file.
@@ -767,6 +744,83 @@ this.RemoteControlService = {
       binary += String.fromCharCode(bytes[i])
     }
     return btoa(binary);
+  },
+
+  _restoreRSAKeys: function() {
+    debug("_restoreRSAKeys");
+
+    RemoteControlService._rsaPublicKeySPKI = RemoteControlService._base64ToArrayBuffer(Services.prefs.getCharPref("remotecontrol.service.rsa_publickey_spki"));
+
+    this._subtle.importKey(
+      "spki",
+      RemoteControlService._rsaPublicKeySPKI,
+      {
+        name: "RSA-OAEP",
+        hash: {name: "SHA-256"},
+      },
+      true, // key is extractable for client side
+      ["wrapKey"]
+    ).then(function(publicKey) {
+      debug("import RSA public key done");
+      RemoteControlService._rsaPublicKey = publicKey;
+    }).catch(function(err){
+      debug("import RSA public key error:" + err);
+    });
+
+    this._subtle.importKey(
+      "pkcs8",
+      RemoteControlService._base64ToArrayBuffer(Services.prefs.getCharPref("remotecontrol.service.rsa_privatekey_pkcs8")),
+      {
+        name: "RSA-OAEP",
+        hash: {name: "SHA-256"},
+      },
+      false, // key is not extractable
+      ["unwrapKey"]
+    ).then(function(privateKey) {
+      debug("import RSA private key done");
+      RemoteControlService._rsaPrivateKey = privateKey;
+    }).catch(function(err) {
+      debug("import RSA private key error:" + err);
+    });
+  },
+
+  _generateRSAKeys: function() {
+    debug("_generateRSAKeys");
+
+    var option = {
+      name: "RSA-OAEP",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([0x01, 0x00, 0x01]),
+      hash: { name: "SHA-256" }
+    };
+
+    this._subtle.generateKey(
+      option,
+      true,
+      ["wrapKey", "unwrapKey"]
+    ).then(function(key) {
+      debug("generate RSA key done");
+      RemoteControlService._rsaPublicKey = key.publicKey;
+      RemoteControlService._rsaPrivateKey = key.privateKey;
+
+      RemoteControlService._subtle.exportKey("spki", key.publicKey).then(function(keydata) {
+        debug("export public key done");
+        RemoteControlService._rsaPublicKeySPKI = keydata;
+        Services.prefs.setCharPref("remotecontrol.service.rsa_publickey_spki", RemoteControlService._base64FromArrayBuffer(keydata));
+      }).catch(function(err) {
+        debug("export RSA public key error: " + err);
+      });
+
+      RemoteControlService._subtle.exportKey("pkcs8", key.privateKey).then(function(keydata) {
+        debug("export private key done");
+        Services.prefs.setCharPref("remotecontrol.service.rsa_privatekey_pkcs8", RemoteControlService._base64FromArrayBuffer(keydata));
+      }).catch(function(err) {
+        debug("export RSA private key error: " + err);
+      });
+
+    }).catch(function(err) {
+      debug("generate RSA key error: " + err);
+    });
   },
 };
 
