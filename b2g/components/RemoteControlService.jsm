@@ -87,19 +87,19 @@ this.RemoteControlService = {
   _default_port: null,
   _UUID_expire_days: null,
   _pin: null,
-  _uuids: null, // record devices uuid : expire_timestamp pair
+  _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, key: <symmetric_key> }
   _pairingRequired: false,
   // Secure connection
   _subtle: null,
   _rsaPublicKey: null,
   _rsaPublicKeySPKI: null,
   _rsaPrivateKey: null,
+  _secureTickets: null, // record key as ticket number, value as { status: <status>, UUID: <UUID> }
 
   init: function() {
     DEBUG && debug("init");
 
     this._httpServer = new HttpServer();
-    this._uuids = {};
 
     // Initial member variables from Gecko preferences
     this._client_page_prepath = Services.prefs.getCharPref("remotecontrol.client_page.prepath");
@@ -125,6 +125,10 @@ this.RemoteControlService = {
       RemoteControlService._handleRequest(request, response);
     });
 
+
+    this._uuids = new Map();
+/*
+    this._uuids = {};
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
       handle: function(name, result) {
@@ -144,6 +148,7 @@ this.RemoteControlService = {
 
     let lock = SettingsService.createLock();
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
+*/
 
     // Prepare subtle crypto
     this._subtle = Services.wm.getMostRecentWindow("navigator:browser").crypto.subtle;
@@ -155,6 +160,8 @@ this.RemoteControlService = {
     } else {
       this._generateRSAKeys();
     }
+
+    _secureTickets = new Map();
   },
 
   // Start http server and register observers.
@@ -421,8 +428,9 @@ this.RemoteControlService = {
   },
 
   // Generate UUID and expire timestamp
-  _generateUUID: function() {
+  _generateUUID: function(key) {
     let uuidString = UUIDGenerator.generateUUID().toString();
+    /*
     let timeStamp = ((new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
     let lock = SettingsService.createLock();
     let uuids = this._uuids;
@@ -438,8 +446,25 @@ this.RemoteControlService = {
     }
 
     lock.set(RC_SETTINGS_DEVICES, uuids, null);
+    */
+    //return uuidString;
+    var randomValues = new Uint8Array(12);
+    var self = this;
 
-    return uuidString;
+    return new Promise(function(resolve, reject) {
+      subtle.encrypt(
+        {
+          name: 'AES-GCM',
+          iv: window.crypto.getRandomValues(randomValues)
+        },
+        key,
+        base64ToArrayBuffer(uuidString)
+      ).then(function(encryptedUUID){
+        resolve(base64fromArrayBuffer(encryptedUUID));
+      }).catch(function(err){
+        reject(err);
+      });
+    });
   },
 
   _isValidUUID: function(uuid) {
@@ -693,8 +718,14 @@ this.RemoteControlService = {
       s.importFunction(function getRSAPublicKeySPKI() {
         return self._rsaPublicKeySPKI;
       });
-      s.importFunction(function getPrivateKey() {
+      s.importFunction(function getRSAPrivateKey() {
         return self._rsaPrivateKey;
+      })
+      s.importFunction(function generateSecureTicket() {
+        return self._generateSecureTicket();
+      })
+      s.importFunction(function setSecureTicketStatus(ticket, status, encryptedBase64UUID) {
+        return self._setSecureTicketStatus(ticket, status, encryptedBase64UUID);
       })
 
       try {
@@ -749,7 +780,8 @@ this.RemoteControlService = {
   _restoreRSAKeys: function() {
     debug("_restoreRSAKeys");
 
-    RemoteControlService._rsaPublicKeySPKI = RemoteControlService._base64ToArrayBuffer(Services.prefs.getCharPref("remotecontrol.service.rsa_publickey_spki"));
+    RemoteControlService._rsaPublicKeySPKI = RemoteControlService._base64ToArrayBuffer(
+      Services.prefs.getCharPref("remotecontrol.service.rsa_publickey_spki"));
 
     this._subtle.importKey(
       "spki",
@@ -821,6 +853,24 @@ this.RemoteControlService = {
     }).catch(function(err) {
       debug("generate RSA key error: " + err);
     });
+  },
+
+  _generateSecureTicket: function() {
+    let timestamp = (new Date().getTime()).toString();
+    this._secureTickets.set(timestamp, { status : 0 })
+
+    return timestamp;
+  },
+
+  _setSecureTicketStatus: function(ticket, status, encryptedBase64UUID) {
+    if (this._secureTickets.has(ticket)) {
+      var value = this._secureTickets.get(ticket);
+
+      value.status = status;
+      if (encryptedBase64UUID !== null) {
+        value.UUID = encryptedBase64UUID;
+      }
+    }
   },
 };
 
