@@ -90,6 +90,7 @@ this.RemoteControlService = {
   _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, key: <symmetric_key> }
   _pairingRequired: false,
   // Secure connection
+  _crypto: null,
   _subtle: null,
   _rsaPublicKey: null,
   _rsaPublicKeySPKI: null,
@@ -150,8 +151,9 @@ this.RemoteControlService = {
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
 */
 
-    // Prepare subtle crypto
-    this._subtle = Services.wm.getMostRecentWindow("navigator:browser").crypto.subtle;
+    // Prepare crypto and subtle
+    this._crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
+    this._subtle = this._crypto.subtle;
 
     // Restore existing RSA keys or generate new RSA keys
     if (Services.prefs.prefHasUserValue("remotecontrol.service.rsa_privatekey_pkcs8") &&
@@ -161,7 +163,7 @@ this.RemoteControlService = {
       this._generateRSAKeys();
     }
 
-    _secureTickets = new Map();
+    this._secureTickets = new Map();
   },
 
   // Start http server and register observers.
@@ -429,7 +431,8 @@ this.RemoteControlService = {
 
   // Generate UUID and expire timestamp
   _generateUUID: function(key) {
-    let uuidString = UUIDGenerator.generateUUID().toString();
+    var symmetricKey = key;
+    var uuidString = UUIDGenerator.generateUUID().toString();
     /*
     let timeStamp = ((new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
     let lock = SettingsService.createLock();
@@ -451,24 +454,30 @@ this.RemoteControlService = {
     var randomValues = new Uint8Array(12);
     var self = this;
 
-    return new Promise(function(resolve, reject) {
-      subtle.encrypt(
+    return new Promise(function(aResolve, aReject) {
+    try {
+      self._subtle.encrypt(
         {
           name: 'AES-GCM',
-          iv: window.crypto.getRandomValues(randomValues)
+          iv: self._crypto.getRandomValues(randomValues)
         },
-        key,
-        base64ToArrayBuffer(uuidString)
+        symmetricKey,
+        self._encodeText(uuidString)
       ).then(function(encryptedUUID){
-        resolve(base64fromArrayBuffer(encryptedUUID));
+        var result = new Uint8Array(12 + encryptedUUID.byteLength);
+        result.set(randomValues, 0);
+        result.set(new Uint8Array(encryptedUUID), 12);
+        aResolve(self._base64FromArrayBuffer(result));
       }).catch(function(err){
-        reject(err);
+        aReject(err);
       });
+    } catch (e) { debug (e.message); }
     });
   },
 
   _isValidUUID: function(uuid) {
-    return (uuid in this._uuids);
+    //return (uuid in this._uuids);
+    return this._uuids.has(uuid);
   },
 
   _updateUUID: function(uuid, timestamp) {
@@ -554,16 +563,39 @@ this.RemoteControlService = {
     }
   },
 
+  _hasValidUUIDInCookie: function(request) {
+    // Return false if there is no cookie in header
+    if (!request.hasHeader("Cookie")) {
+      return false;
+    }
+
+    // Split cookie from header
+    // If cookie name is "uuid" and value is a valid UUID stored, return true
+    var cookies = request.getHeader("Cookie").split(";");
+    for (let i = 0; i < cookies.length; i++) {
+      let cookie = decodeURIComponent(cookies[i]);
+      let cookieName = cookie.substr(0, cookie.indexOf("="));
+      let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
+
+      cookieName = cookieName.replace(/^\s+|\s+$/g, "");
+      if (cookieName == "uuid" && this._isValidUUID(cookieValue)) {
+        return true;
+      }
+    }
+
+    return false;
+  },
+
   _transferRequestToPath: function(request) {
     if (request.path == "/") {
       // If it's not need to pairing or there is cookie with valid UUID
       // Send client.html to the user directly to use RemoteControl
-      // When check cookie, remove "uuid=" from first 5 character from cookie to get correct UUID
       // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
       // Send pairing.html to start pairing
-      if (this._pairingRequired == false ||
-          (request.hasHeader("Cookie") &&
-            this._isValidUUID (decodeURIComponent(request.getHeader("Cookie")).substring(5)))) {
+      if (!this._hasValidUUIDInCookie(request)) {
+        debug("secure.html");
+        return "/secure.html";
+      } else if (this._pairingRequired == false) { // TODO: check if UUID is already paired
         return "/client.html";
       } else {
         var pin = this._getPIN();
@@ -697,14 +729,17 @@ this.RemoteControlService = {
       s.importFunction(function clearPIN() {
         self._clearPIN();
       });
-      s.importFunction(function generateUUID() {
-        return self._generateUUID();
+      s.importFunction(function generateUUID(key) {
+        return self._generateUUID(key);
       });
       s.importFunction(function isValidUUID(uuid) {
         return self._isValidUUID(uuid);
       });
       s.importFunction(function isPairingRequired() {
         return self._pairingRequired;
+      });
+       s.importFunction(function hasValidUUIDInCookie(httpRequest) {
+        return self._hasValidUUIDInCookie(httpRequest);
       });
       s.importFunction(function base64ToArrayBuffer(base64) {
         return self._base64ToArrayBuffer(base64);
@@ -724,8 +759,14 @@ this.RemoteControlService = {
       s.importFunction(function generateSecureTicket() {
         return self._generateSecureTicket();
       })
+      s.importFunction(function getSecureTicketStatus(ticket) {
+        return self._getSecureTicketStatus(ticket);
+      })
       s.importFunction(function setSecureTicketStatus(ticket, status, encryptedBase64UUID) {
         return self._setSecureTicketStatus(ticket, status, encryptedBase64UUID);
+      })
+      s.importFunction(function getEncryptedUUID(ticket) {
+        return self._getEncryptedUUID(ticket);
       })
 
       try {
@@ -756,6 +797,122 @@ this.RemoteControlService = {
     }
   },
 
+  _strToArrayBuffer: function(str) {
+    var buf = new ArrayBuffer(str.length * 2); // 2 bytes for each char
+    var bufView = new Uint16Array(buf);
+    for (var i = 0, strLen = str.length; i < strLen; i++) {
+      bufView[i] = str.charCodeAt(i);
+    }
+    return buf;
+  },
+
+  _encodeText: function(string, units) {
+    units = units || Infinity
+    var codePoint
+    var length = string.length
+    var leadSurrogate = null
+    var bytes = []
+    var i = 0
+
+    for (; i < length; i++) {
+      codePoint = string.charCodeAt(i)
+
+      // is surrogate component
+      if (codePoint > 0xD7FF && codePoint < 0xE000) {
+        // last char was a lead
+        if (leadSurrogate) {
+          // 2 leads in a row
+          if (codePoint < 0xDC00) {
+            if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+            leadSurrogate = codePoint
+            continue
+          } else {
+            // valid surrogate pair
+            codePoint = leadSurrogate - 0xD800 << 10 | codePoint - 0xDC00 | 0x10000
+            leadSurrogate = null
+          }
+        } else {
+          // no lead yet
+
+          if (codePoint > 0xDBFF) {
+            // unexpected trail
+            if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+            continue
+          } else if (i + 1 === length) {
+            // unpaired lead
+            if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+            continue
+          } else {
+            // valid lead
+            leadSurrogate = codePoint
+            continue
+          }
+        }
+      } else if (leadSurrogate) {
+        // valid bmp char, but last char was a lead
+        if ((units -= 3) > -1) bytes.push(0xEF, 0xBF, 0xBD)
+        leadSurrogate = null
+      }
+
+      // encode utf8
+      if (codePoint < 0x80) {
+        if ((units -= 1) < 0) break
+        bytes.push(codePoint)
+      } else if (codePoint < 0x800) {
+        if ((units -= 2) < 0) break
+        bytes.push(
+          codePoint >> 0x6 | 0xC0,
+          codePoint & 0x3F | 0x80
+        )
+      } else if (codePoint < 0x10000) {
+        if ((units -= 3) < 0) break
+        bytes.push(
+          codePoint >> 0xC | 0xE0,
+          codePoint >> 0x6 & 0x3F | 0x80,
+          codePoint & 0x3F | 0x80
+        )
+      } else if (codePoint < 0x200000) {
+        if ((units -= 4) < 0) break
+        bytes.push(
+          codePoint >> 0x12 | 0xF0,
+          codePoint >> 0xC & 0x3F | 0x80,
+          codePoint >> 0x6 & 0x3F | 0x80,
+          codePoint & 0x3F | 0x80
+        )
+      } else {
+        throw new Error('Invalid code point')
+      }
+    }
+
+    return new Uint8Array(bytes);
+  },
+
+  _decodeUtf8Char: function(str) {
+    try {
+      return decodeURIComponent(str)
+    } catch (err) {
+      return String.fromCharCode(0xFFFD) // UTF 8 invalid char
+    }
+  },
+
+  _decodeText: function(buf, start, end) {
+    var res = ''
+    var tmp = ''
+    end = Math.min(buf.length, end || Infinity)
+    start = start || 0;
+
+    for (var i = start; i < end; i++) {
+      if (buf[i] <= 0x7F) {
+        res += this._decodeUtf8Char(tmp) + String.fromCharCode(buf[i])
+        tmp = ''
+      } else {
+        tmp += '%' + buf[i].toString(16)
+      }
+    }
+
+    return res + this._decodeUtf8Char(tmp)
+  },
+
   _base64ToArrayBuffer: function(base64) {
     var binary_string = atob(base64);
     var len = binary_string.length;
@@ -767,7 +924,6 @@ this.RemoteControlService = {
   },
 
   _base64FromArrayBuffer: function(arrayBuffer) {
-
     var binary = '';
     var bytes = new Uint8Array(arrayBuffer);
     var len = bytes.byteLength;
@@ -862,6 +1018,16 @@ this.RemoteControlService = {
     return timestamp;
   },
 
+  _getSecureTicketStatus: function(ticket) {
+    if (this._secureTickets.has(ticket)) {
+      var value = this._secureTickets.get(ticket);
+
+      return value.status;
+    }
+
+    return 2;
+  },
+
   _setSecureTicketStatus: function(ticket, status, encryptedBase64UUID) {
     if (this._secureTickets.has(ticket)) {
       var value = this._secureTickets.get(ticket);
@@ -871,6 +1037,14 @@ this.RemoteControlService = {
         value.UUID = encryptedBase64UUID;
       }
     }
+  },
+
+  _getEncryptedUUID: function(ticket) {
+    if (this._secureTickets.has(ticket)) {
+      return this._secureTickets.get(ticket).UUID;
+    }
+
+    return undefined;
   },
 };
 

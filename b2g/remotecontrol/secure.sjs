@@ -45,7 +45,7 @@ function handleSymmetricKey(event, reply)
   	generateUUID(key).then(function(encryptedBase64UUID) {
   	  setSecureTicketStatus(ticket, 1, encryptedBase64UUID);	
   	});
-  }.catch(function(err){
+  }).catch(function(err){
     setSecureTicketStatus(ticket, 2);
   });
 }
@@ -77,9 +77,7 @@ function handleRequest(request, response)
   switch (event.action) {
   	case "require-public-key":
   	  try {
-  	  	debug("reply require public key");
-  	    reply.publickey = base64FromArrayBuffer(getRSAPublicKeySPKI());
-        response.write(JSON.stringify(reply));
+  	    reply.publicKey = base64FromArrayBuffer(getRSAPublicKeySPKI());
       } catch (e) {
       	reply.error = e.message;
       }
