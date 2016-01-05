@@ -126,10 +126,8 @@ this.RemoteControlService = {
       RemoteControlService._handleRequest(request, response);
     });
 
-
-    this._uuids = new Map();
-/*
     this._uuids = {};
+
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
       handle: function(name, result) {
@@ -149,7 +147,6 @@ this.RemoteControlService = {
 
     let lock = SettingsService.createLock();
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
-*/
 
     // Prepare crypto and subtle
     this._crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
@@ -433,29 +430,36 @@ this.RemoteControlService = {
   _generateUUID: function(key) {
     var symmetricKey = key;
     var uuidString = UUIDGenerator.generateUUID().toString();
-    /*
-    let timeStamp = ((new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
+
+    let timeStamp = (new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000;
     let lock = SettingsService.createLock();
     let uuids = this._uuids;
 
-    uuids[uuidString] = timeStamp;
+    uuids[uuidString] = { timeStamp: timeStamp, paired: false, symmetricKey: key };
 
     // Check and remove expired UUID
+    let now = new Date().getTime();
     for (let uuid in uuids) {
-      let now = new Date().getTime();
-      if (now > parseInt(uuids[uuid])) {
+      let data = uuids[uuid];
+      if (now > data.timeStamp) {
         delete this._uuids[uuid];
       }
     }
 
-    lock.set(RC_SETTINGS_DEVICES, uuids, null);
-    */
-    //return uuidString;
-    var randomValues = new Uint8Array(12);
-    var self = this;
+    let settingsCallback = {
+      handle: function(name, result) {
+        debug("set uuids to MozSettings done");
+      },
+      handleError: function(message) {
+        debug("set uuids to MozSettings fail:" + message);
+      },
+    };
 
+    lock.set(RC_SETTINGS_DEVICES, uuids, null);
+
+    var self = this;
     return new Promise(function(aResolve, aReject) {
-    try {
+      var randomValues = new Uint8Array(12);
       self._subtle.encrypt(
         {
           name: 'AES-GCM',
@@ -471,15 +475,14 @@ this.RemoteControlService = {
       }).catch(function(err){
         aReject(err);
       });
-    } catch (e) { debug (e.message); }
     });
   },
 
   _isValidUUID: function(uuid) {
-    //return (uuid in this._uuids);
-    return this._uuids.has(uuid);
+    return (uuid in this._uuids);
   },
 
+  // TODO: no longer available, remove?
   _updateUUID: function(uuid, timestamp) {
     if (this._isValidUUID(uuid)) {
       this._uuids[uuid] = timestamp;
@@ -563,27 +566,44 @@ this.RemoteControlService = {
     }
   },
 
-  _hasValidUUIDInCookie: function(request) {
-    // Return false if there is no cookie in header
-    if (!request.hasHeader("Cookie")) {
-      return false;
-    }
-
-    // Split cookie from header
-    // If cookie name is "uuid" and value is a valid UUID stored, return true
+  _getUUIDFromCookie: function(request) {
+    // Split cookie from header, split cookie values by ";"
     var cookies = request.getHeader("Cookie").split(";");
+
     for (let i = 0; i < cookies.length; i++) {
       let cookie = decodeURIComponent(cookies[i]);
       let cookieName = cookie.substr(0, cookie.indexOf("="));
       let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
 
       cookieName = cookieName.replace(/^\s+|\s+$/g, "");
-      if (cookieName == "uuid" && this._isValidUUID(cookieValue)) {
-        return true;
+      // If cookie name is "uuid" and value is a valid UUID stored, return the value
+      if (cookieName == "uuid") {
+        return cookieValue;
       }
     }
 
+    return null;
+  },
+
+  _hasValidUUIDInCookie: function(request) {
+    // Return false if there is no cookie in header
+    if (!request.hasHeader("Cookie")) {
+      return false;
+    }
+
+    // If UUID is not null and it's a valid UUID, return true
+    let uuid = this._getUUIDFromCookie(request);
+    if (uuid !== null && this._isValidUUID(uuid)) {
+      return true;
+    }
+
     return false;
+  },
+
+  _uuidIsPaired: function(uuid) {
+    let data = this._uuids[uuid];
+
+    return data.paired;
   },
 
   _transferRequestToPath: function(request) {
@@ -595,7 +615,7 @@ this.RemoteControlService = {
       if (!this._hasValidUUIDInCookie(request)) {
         debug("secure.html");
         return "/secure.html";
-      } else if (this._pairingRequired == false) { // TODO: check if UUID is already paired
+      } else if (this._pairingRequired == false || this._uuidIsPaired(this._getUUIDFromCookie(request))) {
         return "/client.html";
       } else {
         var pin = this._getPIN();
@@ -1013,7 +1033,8 @@ this.RemoteControlService = {
 
   _generateSecureTicket: function() {
     let timestamp = (new Date().getTime()).toString();
-    this._secureTickets.set(timestamp, { status : 0 })
+
+    this._secureTickets.set(timestamp, { status : 0 });
 
     return timestamp;
   },
@@ -1024,7 +1045,6 @@ this.RemoteControlService = {
 
       return value.status;
     }
-
     return 2;
   },
 
