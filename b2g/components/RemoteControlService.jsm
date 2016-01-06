@@ -98,6 +98,8 @@ this.RemoteControlService = {
   _secureTickets: null, // record key as ticket number, value as { status: <status>, UUID: <UUID> }
   // PIN code pairing
   _pairingTickets: null, // record key as ticket number, value as { done: <boolean>, verified: <verified>, reason: <reason> }
+  // Control event process
+  _eventReplies: null, // record key as UUID, value as <boolean>
 
   init: function() {
     DEBUG && debug("init");
@@ -164,6 +166,7 @@ this.RemoteControlService = {
 
     this._secureTickets = new Map();
     this._pairingTickets = new Map();
+    this._eventReplies = new Map();
   },
 
   // Start http server and register observers.
@@ -806,6 +809,15 @@ this.RemoteControlService = {
       s.importFunction(function generatePairingTicket() {
         return self._generatePairingTicket();
       })
+      s.importFunction(function decodeText(buf, start, end) {
+        return self._decodeText(buf, start, end);
+      })
+      s.importFunction(function setEventReply(UUID, verified) {
+        return self._setEventReply(UUID, verified);
+      })
+      s.importFunction(function getEventReply(UUID) {
+        return self._getEventReply(UUID);
+      })
 
       try {
         // Alas, the line number in errors dumped to console when calling the
@@ -1095,6 +1107,19 @@ this.RemoteControlService = {
 
   _getPairingTicketStatus: function(ticket) {
     return this._pairingTickets.get(ticket);
+  },
+
+  _setEventReply: function(UUID, verified) {
+    this._eventReplies.set(UUID, verified);
+  },
+
+  _getEventReply: function(UUID) {
+    if (this._eventReplies.has(UUID)) {
+      return this._eventReplies.get(UUID);
+    }
+
+    // If there is no reply for this UUID, means it's first event, assume it's correct event and return true
+    return true;
   },
 };
 

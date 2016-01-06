@@ -40,7 +40,7 @@ function arrayBufferToString(buf) {
   return String.fromCharCode.apply(null, new Uint8Array(buf));
 }
 
-function handlePairing(request) {
+function handlePairing(request, encryptedPincode) {
   let UUID = getUUIDFromCookie(request);
   var symmetricKey = getSymmetricKeyFromUUID(UUID);
   var ticket = generatePairingTicket();
@@ -89,7 +89,7 @@ function handlePairing(request) {
 }
 
 // Entry point when receive a HTTP request from user, RemoteControlService.jsm
-// queryString format: message={ pincode: <pincode> }
+// queryString format: message={ action: <action> }
 function handleRequest(request, response)
 {
   var reply = {};
@@ -100,7 +100,7 @@ function handleRequest(request, response)
 
   switch(event.action) {
     case "pair-pincode":
-      let ticket = handlePairing(request);
+      let ticket = handlePairing(request, base64ToArrayBuffer(event.encryptedPIN));
       reply.ticket = ticket;
       break;
     case "poll-pair-result":
