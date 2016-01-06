@@ -40,61 +40,72 @@ function arrayBufferToString(buf) {
   return String.fromCharCode.apply(null, new Uint8Array(buf));
 }
 
+function handlePairing(request) {
+  let UUID = getUUIDFromCookie(request);
+  var symmetricKey = getSymmetricKeyFromUUID(UUID);
+  var ticket = generatePairingTicket();
+
+  getSubtle().decrypt(
+    {
+      name: 'AES-GCM',
+      iv: encryptedPincode.slice(0, 12)
+    },
+    symmetricKey,
+    encryptedPincode.slice(12)
+  ).then(function(decrypted){
+    // Simple convert array buffer to number string
+    let pincode = arrayBufferToString(decrypted);
+    DEBUG && debug ("Decrypted PIN code: " + pincode);
+
+    var savedPIN = getPIN();
+    var reply = getPairingTicketStatus();
+    reply.done = true;
+
+    if (savedPIN === null) {
+      // PIN code expired, when 1) user doesn't send PIN code in 30 seconds or 2) other people pairied with the same PIN code
+      // Reply with { done: true, verified: false, reason: expired }
+      reply.verified = false;
+      reply.reason = "expired";
+    } else if (savedPIN == pincode) {
+      // PIN code is correct, clear current PIN code to prevent double pairing
+      // Notify System App dismiss PIN code in notification on screen
+      clearPIN();
+      SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { action: 'pin-destroyed' });
+
+      // Reply with { done: true, verified: true}
+      reply.verified = true;
+    } else {
+      // PIN code incorrect, reply with { done: true, verified: false, reason: invalid }
+      reply.verified = false;
+      reply.reason = "invalid";
+    }
+  }).catch(function(err){
+    debug("decrypt pincode fail:" + err);
+    reply.verified = false;
+    reply.reason = err;
+  });
+
+  return ticket;
+}
+
 // Entry point when receive a HTTP request from user, RemoteControlService.jsm
 // queryString format: message={ pincode: <pincode> }
 function handleRequest(request, response)
 {
-  var UUID = getUUIDFromCookie(request);
   var reply = {};
 
-  if (UUID === null) {
-    reply.verified = false;
-    reply.reason = "nouuid";
-  } else {
-    // Split JSON header "message=" and parse event
-    var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
-    var event = JSON.parse(queryString.substring(8));
-    var key = getSymmetricKey(UUID);
+  // Split JSON header "message=" and parse event
+  var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
+  var event = JSON.parse(queryString.substring(8));
 
-    getSubtle().decrypt(
-      {
-        name: 'AES-GCM',
-        iv: encryptedPincode.slice(0, 12)
-      },
-      key,
-      encryptedPincode.slice(12)
-    ).then(function(decrypted){
-      // Simple convert array buffer to number string
-      let pincode = arrayBufferToString(decrypted);
-      DEBUG && debug ("Decrypted PIN code: " + pincode);
-    
-      var savedPIN = getPIN();
-
-      if (savedPIN === null) {
-        // PIN code expired, when 1) user doesn't send PIN code in 30 seconds or 2) other people pairied with the same PIN code
-        // Reply with { verified: false, reason: expired }
-        reply.verified = false;
-        reply.reason = "expired";
-      } else if (savedPIN == pincode) {
-        // PIN code is correct, clear current PIN code to prevent double pairing
-        // Notify System App dismiss PIN code in notification on screen
-        clearPIN();
-        SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { action: 'pin-destroyed' });
-
-        // Reply with { verified: true, uuid: <UUID> }
-        // Client get the new UUID, connect using Cookie with UUID to get remote control page
-        var newUUID = generateUUID();
-        var uuid;
-        reply.verified = true;
-        reply.uuid = newUUID;
-      } else {
-        // PIN code incorrect, reply with { verified: false, reason: invalid }
-        reply.verified = false;
-        reply.reason = "invalid";
-      }
-    }).catch(function(err){
-      debug("decrypt pincode fail:" + err);
-    });
+  switch(event.action) {
+    case "pair-pincode":
+      let ticket = handlePairing(request);
+      reply.ticket = ticket;
+      break;
+    case "poll-pair-result":
+      reply = getPairingTicketStatus(event.ticket);
+      break;
   }
 
   response.write(JSON.stringify(reply));

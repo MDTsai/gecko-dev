@@ -96,6 +96,8 @@ this.RemoteControlService = {
   _rsaPublicKeySPKI: null,
   _rsaPrivateKey: null,
   _secureTickets: null, // record key as ticket number, value as { status: <status>, UUID: <UUID> }
+  // PIN code pairing
+  _pairingTickets: null, // record key as ticket number, value as { done: <boolean>, verified: <verified>, reason: <reason> }
 
   init: function() {
     DEBUG && debug("init");
@@ -161,6 +163,7 @@ this.RemoteControlService = {
     }
 
     this._secureTickets = new Map();
+    this._pairingTickets = new Map();
   },
 
   // Start http server and register observers.
@@ -505,6 +508,18 @@ this.RemoteControlService = {
     lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
   },
 
+  _getSymmetricKeyFromUUID: function(UUID) {
+    let data = this._uuids[UUID];
+
+    return data.symmetricKey;
+  },
+
+  _getPairedFromUUID: function(UUID) {
+    let data = this._uuids[UUID];
+
+    return data.paired;
+  },
+
   _zeroFill: function(number, width) {
     width -= number.toString().length;
     if ( width > 0 )
@@ -600,12 +615,6 @@ this.RemoteControlService = {
     return false;
   },
 
-  _uuidIsPaired: function(uuid) {
-    let data = this._uuids[uuid];
-
-    return data.paired;
-  },
-
   _transferRequestToPath: function(request) {
     if (request.path == "/") {
       // If it's not need to pairing or there is cookie with valid UUID
@@ -615,7 +624,7 @@ this.RemoteControlService = {
       if (!this._hasValidUUIDInCookie(request)) {
         debug("secure.html");
         return "/secure.html";
-      } else if (this._pairingRequired == false || this._uuidIsPaired(this._getUUIDFromCookie(request))) {
+      } else if (this._pairingRequired == false || this._getPairedFromUUID(this._getUUIDFromCookie(request))) {
         return "/client.html";
       } else {
         var pin = this._getPIN();
@@ -788,6 +797,15 @@ this.RemoteControlService = {
       s.importFunction(function getEncryptedUUID(ticket) {
         return self._getEncryptedUUID(ticket);
       })
+      s.importFunction(function getUUIDFromCookie(request) {
+        return self._getUUIDFromCookie(request);
+      })
+      s.importFunction(function getSymmetricKeyFromUUID(UUID) {
+        return self._getSymmetricKeyFromUUID(UUID);
+      })
+      s.importFunction(function generatePairingTicket() {
+        return self._generatePairingTicket();
+      })
 
       try {
         // Alas, the line number in errors dumped to console when calling the
@@ -817,7 +835,7 @@ this.RemoteControlService = {
     }
   },
 
-  _strToArrayBuffer: function(str) {
+  _stringToArrayBuffer: function(str) {
     var buf = new ArrayBuffer(str.length * 2); // 2 bytes for each char
     var bufView = new Uint16Array(buf);
     for (var i = 0, strLen = str.length; i < strLen; i++) {
@@ -1065,6 +1083,18 @@ this.RemoteControlService = {
     }
 
     return undefined;
+  },
+
+  _generatePairingTicket: function() {
+    let timestamp = (new Date().getTime()).toString();
+
+    this._pairingTickets.set(timestamp, { done: false });
+
+    return timestamp;
+  },
+
+  _getPairingTicketStatus: function(ticket) {
+    return this._pairingTickets.get(ticket);
   },
 };
 
