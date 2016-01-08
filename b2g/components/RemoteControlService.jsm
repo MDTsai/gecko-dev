@@ -441,7 +441,7 @@ this.RemoteControlService = {
     let lock = SettingsService.createLock();
     let uuids = this._uuids;
 
-    uuids[uuidString] = { timeStamp: timeStamp, paired: false, symmetricKey: key };
+    uuids[uuidString] = { timeStamp: timeStamp, paired: false, symmetricKey: symmetricKey };
 
     // Check and remove expired UUID
     let now = new Date().getTime();
@@ -461,7 +461,7 @@ this.RemoteControlService = {
       },
     };
 
-    lock.set(RC_SETTINGS_DEVICES, uuids, null);
+    //lock.set(RC_SETTINGS_DEVICES, uuids, settingsCallback);
 
     var self = this;
     return new Promise(function(aResolve, aReject) {
@@ -808,6 +808,9 @@ this.RemoteControlService = {
       })
       s.importFunction(function generatePairingTicket() {
         return self._generatePairingTicket();
+      })
+      s.importFunction(function getPairingTicketStatus(ticket) {
+        return self._getPairingTicketStatus(ticket);
       })
       s.importFunction(function decodeText(buf, start, end) {
         return self._decodeText(buf, start, end);

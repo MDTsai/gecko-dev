@@ -58,7 +58,7 @@ function handlePairing(request, encryptedPincode) {
     DEBUG && debug ("Decrypted PIN code: " + pincode);
 
     var savedPIN = getPIN();
-    var reply = getPairingTicketStatus();
+    var reply = getPairingTicketStatus(ticket);
     reply.done = true;
 
     if (savedPIN === null) {
