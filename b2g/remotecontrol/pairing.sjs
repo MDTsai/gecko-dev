@@ -41,7 +41,7 @@ function arrayBufferToString(buf) {
 }
 
 function handlePairing(request, encryptedPincode) {
-  let UUID = getUUIDFromCookie(request);
+  var UUID = getUUIDFromCookie(request);
   var symmetricKey = getSymmetricKeyFromUUID(UUID);
   var ticket = generatePairingTicket();
 
@@ -74,6 +74,7 @@ function handlePairing(request, encryptedPincode) {
 
       // Reply with { done: true, verified: true}
       reply.verified = true;
+      updateUUID(UUID, true);
     } else {
       // PIN code incorrect, reply with { done: true, verified: false, reason: invalid }
       reply.verified = false;

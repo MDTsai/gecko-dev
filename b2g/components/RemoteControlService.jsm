@@ -87,7 +87,8 @@ this.RemoteControlService = {
   _default_port: null,
   _UUID_expire_days: null,
   _pin: null,
-  _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, key: <symmetric_key> }
+  _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, paired: <boolean>, symmetricKey: <symmetric_key> }
+  _symmetricKeys: null,
   _pairingRequired: false,
   // Secure connection
   _crypto: null,
@@ -130,7 +131,13 @@ this.RemoteControlService = {
       RemoteControlService._handleRequest(request, response);
     });
 
+
+    // Prepare crypto and subtle
+    this._crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
+    this._subtle = this._crypto.subtle;
+
     this._uuids = {};
+    this._symmetricKeys = {};
 
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
@@ -143,6 +150,8 @@ this.RemoteControlService = {
             } else {
               RemoteControlService._uuids = result;
             }
+
+            RemoteControlService._restoreSymmetricKeys();
             break;
         }
       },
@@ -151,10 +160,6 @@ this.RemoteControlService = {
 
     let lock = SettingsService.createLock();
     lock.get(RC_SETTINGS_DEVICES, settingsCallback);
-
-    // Prepare crypto and subtle
-    this._crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
-    this._subtle = this._crypto.subtle;
 
     // Restore existing RSA keys or generate new RSA keys
     if (Services.prefs.prefHasUserValue("remotecontrol.service.rsa_privatekey_pkcs8") &&
@@ -356,6 +361,9 @@ this.RemoteControlService = {
 
         if (subject["key"] == RC_SETTINGS_DEVICES) {
           this._uuids = subject.value;
+          // If there is changes from _uuids, re-export symmetric keys
+          this._symmetricKeys = {};
+          RemoteControlService._restoreSymmetricKeys();
         }
 
         break;
@@ -436,12 +444,9 @@ this.RemoteControlService = {
   _generateUUID: function(key) {
     var symmetricKey = key;
     var uuidString = UUIDGenerator.generateUUID().toString();
+    var uuids = this._uuids;
 
     let timeStamp = (new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000;
-    let lock = SettingsService.createLock();
-    let uuids = this._uuids;
-
-    uuids[uuidString] = { timeStamp: timeStamp, paired: false, symmetricKey: symmetricKey };
 
     // Check and remove expired UUID
     let now = new Date().getTime();
@@ -452,16 +457,30 @@ this.RemoteControlService = {
       }
     }
 
-    let settingsCallback = {
-      handle: function(name, result) {
-        debug("set uuids to MozSettings done");
-      },
-      handleError: function(message) {
-        debug("set uuids to MozSettings fail:" + message);
-      },
-    };
+    // Export key received
+    this._subtle.exportKey(
+      "jwk",
+      symmetricKey
+    ).then(function(keydata) {
+      let lock = SettingsService.createLock();
+      uuids[uuidString] = { timeStamp: timeStamp, paired: false, symmetricKey: JSON.stringify(keydata) };
 
-    //lock.set(RC_SETTINGS_DEVICES, uuids, settingsCallback);
+      let settingsCallback = {
+        handle: function(name, result) {
+          debug("set uuids to MozSettings done");
+        },
+        handleError: function(message) {
+          debug("set uuids to MozSettings fail:" + message);
+        },
+      };
+
+      lock.set(RC_SETTINGS_DEVICES, uuids, settingsCallback);
+    }).catch(function(err) {
+      debug("export symmetric key err:" + err);
+    });
+
+    // Store symmetricKeys for runtime
+    this._symmetricKeys[uuidString] = symmetricKey;
 
     var self = this;
     return new Promise(function(aResolve, aReject) {
@@ -488,10 +507,10 @@ this.RemoteControlService = {
     return (uuid in this._uuids);
   },
 
-  // TODO: no longer available, remove?
-  _updateUUID: function(uuid, timestamp) {
+  _updateUUID: function(uuid, paired) {
     if (this._isValidUUID(uuid)) {
-      this._uuids[uuid] = timestamp;
+      let data = this._uuids[uuid];
+      data.paired = paired;
     }
   },
 
@@ -512,9 +531,7 @@ this.RemoteControlService = {
   },
 
   _getSymmetricKeyFromUUID: function(UUID) {
-    let data = this._uuids[UUID];
-
-    return data.symmetricKey;
+    return this._symmetricKeys[UUID];
   },
 
   _getPairedFromUUID: function(UUID) {
@@ -767,6 +784,9 @@ this.RemoteControlService = {
       s.importFunction(function isValidUUID(uuid) {
         return self._isValidUUID(uuid);
       });
+      s.importFunction(function updateUUID(uuid, paired) {
+        return self._updateUUID(uuid, paired);
+      })
       s.importFunction(function isPairingRequired() {
         return self._pairingRequired;
       });
@@ -1062,6 +1082,29 @@ this.RemoteControlService = {
     }).catch(function(err) {
       debug("generate RSA key error: " + err);
     });
+  },
+
+  _restoreSymmetricKeys: function() {
+    debug("_restoreSymmetricKeys");
+
+    for(var prop in this._uuids) {
+      let uuid = prop;
+      var data = this._uuids[uuid];
+
+      this._subtle.importKey(
+        "jwk",
+        JSON.parse(data.symmetricKey),
+        {
+          name: "AES-GCM",
+        },
+        true,
+        ["encrypt", "decrypt"]
+      ).then(function(key) {
+        RemoteControlService._symmetricKeys[uuid] = key;
+      }).catch(function(err) {
+        debug("import symmetric key err:" + err);
+      });
+    }
   },
 
   _generateSecureTicket: function() {
