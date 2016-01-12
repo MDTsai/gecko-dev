@@ -87,8 +87,8 @@ this.RemoteControlService = {
   _default_port: null,
   _UUID_expire_days: null,
   _pin: null,
-  _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, paired: <boolean>, symmetricKey: <symmetric_key> }
-  _symmetricKeys: null,
+  _uuids: null, // record key as devices uuid, value as { timestamp: <timestamp>, paired: <boolean>, symmetricKey: <symmetricKeyJWK> }
+  _symmetricKeys: null, // record key as device uuid, value as crypto key (AES-GCM)
   _pairingRequired: false,
   // Secure connection
   _crypto: null,
@@ -151,6 +151,7 @@ this.RemoteControlService = {
               RemoteControlService._uuids = result;
             }
 
+            // Restore symmetric key from JWK
             RemoteControlService._restoreSymmetricKeys();
             break;
         }
@@ -440,11 +441,13 @@ this.RemoteControlService = {
     this._sharedState[key] = value;
   },
 
-  // Generate UUID and expire timestamp
+  // Generate UUID, expire timestamp, already paired and symmetric key JWK
+  // Return a promise when UUID encrypted by symmetric key
   _generateUUID: function(key) {
     var symmetricKey = key;
     var uuidString = UUIDGenerator.generateUUID().toString();
     var uuids = this._uuids;
+    debug(uuidString);
 
     let timeStamp = (new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000;
 
@@ -457,7 +460,7 @@ this.RemoteControlService = {
       }
     }
 
-    // Export key received
+    // Export key received and save to MozSettings
     this._subtle.exportKey(
       "jwk",
       symmetricKey
@@ -484,6 +487,7 @@ this.RemoteControlService = {
 
     var self = this;
     return new Promise(function(aResolve, aReject) {
+      // IV length is 12, attach IV before encrypted UUID
       var randomValues = new Uint8Array(12);
       self._subtle.encrypt(
         {
@@ -531,13 +535,19 @@ this.RemoteControlService = {
   },
 
   _getSymmetricKeyFromUUID: function(UUID) {
-    return this._symmetricKeys[UUID];
+    if (UUID in this._uuids) {
+      return this._symmetricKeys[UUID];  
+    }
+    return null;
   },
 
   _getPairedFromUUID: function(UUID) {
-    let data = this._uuids[UUID];
+    if (UUID in this._uuids) {
+      let data = this._uuids[UUID];
 
-    return data.paired;
+      return data.paired;
+    }
+    return false;
   },
 
   _zeroFill: function(number, width) {
@@ -601,6 +611,7 @@ this.RemoteControlService = {
     }
   },
 
+  // To see if there is cookie in http request header named "uuid"
   _getUUIDFromCookie: function(request) {
     // Split cookie from header, split cookie values by ";"
     var cookies = request.getHeader("Cookie").split(";");
@@ -637,7 +648,8 @@ this.RemoteControlService = {
 
   _transferRequestToPath: function(request) {
     if (request.path == "/") {
-      // If it's not need to pairing or there is cookie with valid UUID
+      // Request without valid UUID, should establish secure connection, exchange key from secure.html
+      // If it's not need to pairing or the client is already paired
       // Send client.html to the user directly to use RemoteControl
       // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
       // Send pairing.html to start pairing
@@ -823,6 +835,9 @@ this.RemoteControlService = {
       s.importFunction(function getUUIDFromCookie(request) {
         return self._getUUIDFromCookie(request);
       })
+      s.importFunction(function getPairedFromUUID(UUID) {
+        return self._getPairedFromUUID(UUID);
+      })
       s.importFunction(function getSymmetricKeyFromUUID(UUID) {
         return self._getSymmetricKeyFromUUID(UUID);
       })
@@ -870,6 +885,7 @@ this.RemoteControlService = {
     }
   },
 
+  // Not necessary, should be removed?
   _stringToArrayBuffer: function(str) {
     var buf = new ArrayBuffer(str.length * 2); // 2 bytes for each char
     var bufView = new Uint16Array(buf);
@@ -879,6 +895,7 @@ this.RemoteControlService = {
     return buf;
   },
 
+  // Should use TextEncoder.encode to replace?
   _encodeText: function(string, units) {
     units = units || Infinity
     var codePoint
@@ -968,6 +985,7 @@ this.RemoteControlService = {
     }
   },
 
+  // Should use TextDecoder.decode to replace?
   _decodeText: function(buf, start, end) {
     var res = ''
     var tmp = ''
@@ -986,6 +1004,7 @@ this.RemoteControlService = {
     return res + this._decodeUtf8Char(tmp)
   },
 
+  // Base64 to/from array buffer for most subtle.encrypt/decrypt
   _base64ToArrayBuffer: function(base64) {
     var binary_string = atob(base64);
     var len = binary_string.length;
@@ -1006,6 +1025,7 @@ this.RemoteControlService = {
     return btoa(binary);
   },
 
+  // Import RSA public/private key from Gecko preference
   _restoreRSAKeys: function() {
     debug("_restoreRSAKeys");
 
@@ -1045,6 +1065,7 @@ this.RemoteControlService = {
     });
   },
 
+  // Generate RSA public/private key and save to Gecko preference
   _generateRSAKeys: function() {
     debug("_generateRSAKeys");
 
@@ -1084,6 +1105,7 @@ this.RemoteControlService = {
     });
   },
 
+  // Restore symmetric key (AES-GCM) from JWK
   _restoreSymmetricKeys: function() {
     debug("_restoreSymmetricKeys");
 
@@ -1107,6 +1129,7 @@ this.RemoteControlService = {
     }
   },
 
+  // Generate ticket for establish secure connection, default status is 0(pending)
   _generateSecureTicket: function() {
     let timestamp = (new Date().getTime()).toString();
 
@@ -1143,6 +1166,7 @@ this.RemoteControlService = {
     return undefined;
   },
 
+  // Generate ticket for pairing, default process status false
   _generatePairingTicket: function() {
     let timestamp = (new Date().getTime()).toString();
 
@@ -1155,6 +1179,7 @@ this.RemoteControlService = {
     return this._pairingTickets.get(ticket);
   },
 
+  // Set reply status for UUID
   _setEventReply: function(UUID, verified) {
     this._eventReplies.set(UUID, verified);
   },

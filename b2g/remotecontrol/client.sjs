@@ -19,11 +19,11 @@
  * - input: send remote input to TV system app, TV system app acts as an InputMethod
  * - custom: dispatch to TV system app directly, like press PIN is not a keypress, need system app handle it
  *
- * After every event, client.sjs sends reply to client page in response if the connection is still valid if:
- * 1) No pairing required or 2) already paired UUID is not expired.
- * Client page should reload and do pairing again when receives "{ verified: false}"
+ * After every event, client.sjs sends reply for previous event to client page in response if the connection is still valid if:
+ * 1) Previous connection is decrypted, 2) the event type is correct
+ * Client page should reload and establish secure connection again when receives "{ verified: false}"
  *
- * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control#Ajax_Protocol
+ * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control#Control_event_processing
  */
 
 const Cc = Components.classes;
@@ -458,18 +458,20 @@ function handleRemoteInputEvent(detail)
 }
 
 // Entry point when receive a HTTP request from user, RemoteControlService.jsm
-// queryString format: message={ type: <event type>, detail: { <event detail>} }
+// queryString format: message=<base64encryptedcontent>
+// content after decrypted is { type: <event type>, detail: { <event detail> } }
 function handleRequest(request, response)
 {
   let UUID = getUUIDFromCookie(request);
   var reply = {};
 
-  // client.sjs handles the event only when the request with valid UUID
-  if (UUID !== null) {
+  // client.sjs handles the event only when the request with valid UUID, symmetric key, paired status is ok
+  if (UUID !== null && !(isPairingRequired() == true && getPairedFromUUID(UUID) == false)) {
     var symmetricKey = getSymmetricKeyFromUUID(UUID);
     var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
-    // Split header "message=" and get encrypted event
+    // Split header "message=" and get encrypted event from base64
     var encryptedEvent = base64ToArrayBuffer(queryString.substring(8));
+    // IV is first 12 bytes, rest are encrypted content
     getSubtle().decrypt(
       {
         name: 'AES-GCM',
@@ -478,6 +480,7 @@ function handleRequest(request, response)
       symmetricKey,
       encryptedEvent.slice(12)
     ).then(function(decrypted){
+      // Success decrypt, decode to string and parse event, set reply to next event is true
       var event = JSON.parse(decodeText(new Uint8Array(decrypted)));
       setEventReply(UUID, true);
 
@@ -513,6 +516,7 @@ function handleRequest(request, response)
           break;
       }
     }).catch(function(err){
+      // Can't decrypt, next reply will be false
       setEventReply(UUID, false);
     });
 

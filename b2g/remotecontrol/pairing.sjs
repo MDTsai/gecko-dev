@@ -10,13 +10,16 @@
  * it creates a sandbox and executes pairing.sjs in the sandbox.
  * AJAX request will be redirected to handleRequest in pairing.sjs.
  *
- * The message of pairing is { pincode: <pincode> }, with user input PIN code:
- * If the PIN code is correct, pairing.sjs reply with { verified: true, uuid: <UUID> }.
- * With UUID in cookie, user is able to use RemoteControlService.
- * If there is no valid PIN code, ex. expire or already paried by others, pairing.sjs reply with { verified: false, reason: expired }
- * If the PIN code is incorrect, pairing.sjs reply with { verified: false, reason: invalid }
+ * The message of pairing is { action: pair-pincode }, with user input PIN code encrypted.
+ * After decrypted and check PIN code in system, generate the reply for client:
+ * If the PIN code is not decrypted, reply with { done: false }
+ * If the PIN code is correct, pairing.sjs reply with { done: true, verified: true}.
+ * If there is no valid PIN code, ex. expire or already paried by others, pairing.sjs reply with { done: true, verified: false, reason: expired }
+ * If the PIN code is incorrect, pairing.sjs reply with { done: true, verified: false, reason: invalid }
  *
- * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control#Pairing
+ * Client action is { action: poll-pair-result } to get reply
+ *
+ * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control#PIN_code_pairing
  */
 
 const Cc = Components.classes;
@@ -40,6 +43,9 @@ function arrayBufferToString(buf) {
   return String.fromCharCode.apply(null, new Uint8Array(buf));
 }
 
+// Get UUID and symmetric key, generate ticket and reply
+// Decrypt pincode with symmetric key, get PIN code stored in remote control service
+// Check two pincode and set reply
 function handlePairing(request, encryptedPincode) {
   var UUID = getUUIDFromCookie(request);
   var symmetricKey = getSymmetricKeyFromUUID(UUID);
