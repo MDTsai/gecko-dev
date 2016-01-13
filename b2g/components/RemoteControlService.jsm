@@ -447,7 +447,6 @@ this.RemoteControlService = {
     var symmetricKey = key;
     var uuidString = UUIDGenerator.generateUUID().toString();
     var uuids = this._uuids;
-    debug(uuidString);
 
     let timeStamp = (new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000;
 
@@ -834,9 +833,6 @@ this.RemoteControlService = {
       })
       s.importFunction(function getUUIDFromCookie(request) {
         return self._getUUIDFromCookie(request);
-      })
-      s.importFunction(function getPairedFromUUID(UUID) {
-        return self._getPairedFromUUID(UUID);
       })
       s.importFunction(function getSymmetricKeyFromUUID(UUID) {
         return self._getSymmetricKeyFromUUID(UUID);

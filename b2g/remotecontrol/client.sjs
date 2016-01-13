@@ -466,7 +466,7 @@ function handleRequest(request, response)
   var reply = {};
 
   // client.sjs handles the event only when the request with valid UUID, symmetric key, paired status is ok
-  if (UUID !== null && !(isPairingRequired() == true && getPairedFromUUID(UUID) == false)) {
+  if (isValidUUID(UUID)) {
     var symmetricKey = getSymmetricKeyFromUUID(UUID);
     var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
     // Split header "message=" and get encrypted event from base64
