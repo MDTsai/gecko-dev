@@ -198,7 +198,7 @@ this.RemoteControlService = {
               };
 
               self._activeServerAddress = aRecord.getNextAddrAsString();
-              self._httpServer.identity.add("http", self._activeServerAddress, self._activeServerPort);
+              //self._httpServer.identity.add("http", self._activeServerAddress, self._activeServerPort);
               lock.set(RC_SETTINGS_SERVERIP, self._activeServerAddress + ":" + self._activeServerPort, settingsCallback);
             } else {
               aReject("DNSLookupFailure");
@@ -220,7 +220,7 @@ this.RemoteControlService = {
         },
       };
 
-      this._httpServer.identity.add("http", this._activeServerAddress, this._activeServerPort);
+      //this._httpServer.identity.add("http", this._activeServerAddress, this._activeServerPort);
       lock.set(RC_SETTINGS_SERVERIP, this._activeServerAddress + ":" + this._activeServerPort, settingsCallback);
     } else if (Ci.nsINetworkManager){
       // For b2g but there no IP address, reject promise
@@ -262,7 +262,7 @@ this.RemoteControlService = {
     // While network disconnected, remove registered active IP address
     let lock = SettingsService.createLock();
 
-    this._httpServer.identity.remove("http", this._activeServerAddress, this._activeServerPort);
+    //this._httpServer.identity.remove("http", this._activeServerAddress, this._activeServerPort);
     lock.set(RC_SETTINGS_SERVERIP, "", null);
   },
 
@@ -281,7 +281,7 @@ this.RemoteControlService = {
       let lock = SettingsService.createLock();
 
       this._activeServerAddress = ipAddresses.value;
-      this._httpServer.identity.add("http", this._activeServerAddress, this._activeServerPort);
+      //this._httpServer.identity.add("http", this._activeServerAddress, this._activeServerPort);
       lock.set(RC_SETTINGS_SERVERIP, this._activeServerAddress + ":" + this._activeServerPort, null);
     }
   },

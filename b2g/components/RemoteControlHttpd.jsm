@@ -370,9 +370,6 @@ function nsHttpServer()
   /** The handler used to process requests to this server. */
   this._handler = new ServerHandler(this);
 
-  /** Naming information for this server. */
-  this._identity = new ServerIdentity();
-
   /**
    * Indicates when the server is to be shut down at the end of the request.
    */
@@ -580,7 +577,6 @@ nsHttpServer.prototype =
             " pending connections");
       socket.asyncListen(this);
       this._port = socket.port;
-      this._identity._initialize(socket.port, host, true);
       this._socket = socket;
     }
     catch (e)
@@ -607,10 +603,6 @@ nsHttpServer.prototype =
     dumpn(">>> stopping listening on port " + this._socket.port);
     this._socket.close();
     this._socket = null;
-
-    // We can't have this identity any more, and the port on which we're running
-    // this server now could be meaningless the next time around.
-    this._identity._teardown();
 
     this._doQuit = false;
 
@@ -684,14 +676,6 @@ nsHttpServer.prototype =
   registerContentType: function(ext, type)
   {
     this._handler.registerContentType(ext, type);
-  },
-
-  //
-  // see nsIHttpServer.serverIdentity
-  //
-  get identity()
-  {
-    return this._identity;
   },
 
   //
@@ -874,263 +858,6 @@ const HOST_REGEX =
                "\\d+\\.\\d+\\.\\d+\\.\\d+" +
              ")$",
              "i");
-
-
-/**
- * Represents the identity of a server.  An identity consists of a set of
- * (scheme, host, port) tuples denoted as locations (allowing a single server to
- * serve multiple sites or to be used behind both HTTP and HTTPS proxies for any
- * host/port).  Any incoming request must be to one of these locations, or it
- * will be rejected with an HTTP 400 error.  One location, denoted as the
- * primary location, is the location assigned in contexts where a location
- * cannot otherwise be endogenously derived, such as for HTTP/1.0 requests.
- *
- * A single identity may contain at most one location per unique host/port pair;
- * other than that, no restrictions are placed upon what locations may
- * constitute an identity.
- */
-function ServerIdentity()
-{
-  /** The scheme of the primary location. */
-  this._primaryScheme = "http";
-
-  /** The hostname of the primary location. */
-  this._primaryHost = "127.0.0.1"
-
-  /** The port number of the primary location. */
-  this._primaryPort = -1;
-
-  /**
-   * The current port number for the corresponding server, stored so that a new
-   * primary location can always be set if the current one is removed.
-   */
-  this._defaultPort = -1;
-
-  /**
-   * Maps hosts to maps of ports to schemes, e.g. the following would represent
-   * https://example.com:789/ and http://example.org/:
-   *
-   *   {
-   *     "xexample.com": { 789: "https" },
-   *     "xexample.org": { 80: "http" }
-   *   }
-   *
-   * Note the "x" prefix on hostnames, which prevents collisions with special
-   * JS names like "prototype".
-   */
-  this._locations = { "xlocalhost": {} };
-}
-ServerIdentity.prototype =
-{
-  // NSIHTTPSERVERIDENTITY
-
-  //
-  // see nsIHttpServerIdentity.primaryScheme
-  //
-  get primaryScheme()
-  {
-    if (this._primaryPort === -1)
-      throw Cr.NS_ERROR_NOT_INITIALIZED;
-    return this._primaryScheme;
-  },
-
-  //
-  // see nsIHttpServerIdentity.primaryHost
-  //
-  get primaryHost()
-  {
-    if (this._primaryPort === -1)
-      throw Cr.NS_ERROR_NOT_INITIALIZED;
-    return this._primaryHost;
-  },
-
-  //
-  // see nsIHttpServerIdentity.primaryPort
-  //
-  get primaryPort()
-  {
-    if (this._primaryPort === -1)
-      throw Cr.NS_ERROR_NOT_INITIALIZED;
-    return this._primaryPort;
-  },
-
-  //
-  // see nsIHttpServerIdentity.add
-  //
-  add: function(scheme, host, port)
-  {
-    this._validate(scheme, host, port);
-
-    var entry = this._locations["x" + host];
-    if (!entry)
-      this._locations["x" + host] = entry = {};
-
-    entry[port] = scheme;
-  },
-
-  //
-  // see nsIHttpServerIdentity.remove
-  //
-  remove: function(scheme, host, port)
-  {
-    this._validate(scheme, host, port);
-
-    var entry = this._locations["x" + host];
-    if (!entry)
-      return false;
-
-    var present = port in entry;
-    delete entry[port];
-
-    if (this._primaryScheme == scheme &&
-        this._primaryHost == host &&
-        this._primaryPort == port &&
-        this._defaultPort !== -1)
-    {
-      // Always keep at least one identity in existence at any time, unless
-      // we're in the process of shutting down (the last condition above).
-      this._primaryPort = -1;
-      this._initialize(this._defaultPort, host, false);
-    }
-
-    return present;
-  },
-
-  //
-  // see nsIHttpServerIdentity.has
-  //
-  has: function(scheme, host, port)
-  {
-    this._validate(scheme, host, port);
-
-    return "x" + host in this._locations &&
-           scheme === this._locations["x" + host][port];
-  },
-
-  //
-  // see nsIHttpServerIdentity.has
-  //
-  getScheme: function(host, port)
-  {
-    this._validate("http", host, port);
-
-    var entry = this._locations["x" + host];
-    if (!entry)
-      return "";
-
-    return entry[port] || "";
-  },
-
-  //
-  // see nsIHttpServerIdentity.setPrimary
-  //
-  setPrimary: function(scheme, host, port)
-  {
-    this._validate(scheme, host, port);
-
-    this.add(scheme, host, port);
-
-    this._primaryScheme = scheme;
-    this._primaryHost = host;
-    this._primaryPort = port;
-  },
-
-
-  // NSISUPPORTS
-
-  //
-  // see nsISupports.QueryInterface
-  //
-  QueryInterface: function(iid)
-  {
-    if (iid.equals(Ci.nsIHttpServerIdentity) || iid.equals(Ci.nsISupports))
-      return this;
-
-    throw Cr.NS_ERROR_NO_INTERFACE;
-  },
-
-
-  // PRIVATE IMPLEMENTATION
-
-  /**
-   * Initializes the primary name for the corresponding server, based on the
-   * provided port number.
-   */
-  _initialize: function(port, host, addSecondaryDefault)
-  {
-    this._host = host;
-    if (this._primaryPort !== -1)
-      this.add("http", host, port);
-    else
-      this.setPrimary("http", "localhost", port);
-    this._defaultPort = port;
-
-    // Only add this if we're being called at server startup
-    if (addSecondaryDefault && host != "127.0.0.1")
-      this.add("http", "127.0.0.1", port);
-  },
-
-  /**
-   * Called at server shutdown time, unsets the primary location only if it was
-   * the default-assigned location and removes the default location from the
-   * set of locations used.
-   */
-  _teardown: function()
-  {
-    if (this._host != "127.0.0.1") {
-      // Not the default primary location, nothing special to do here
-      this.remove("http", "127.0.0.1", this._defaultPort);
-    }
-
-    // This is a *very* tricky bit of reasoning here; make absolutely sure the
-    // tests for this code pass before you commit changes to it.
-    if (this._primaryScheme == "http" &&
-        this._primaryHost == this._host &&
-        this._primaryPort == this._defaultPort)
-    {
-      // Make sure we don't trigger the readding logic in .remove(), then remove
-      // the default location.
-      var port = this._defaultPort;
-      this._defaultPort = -1;
-      this.remove("http", this._host, port);
-
-      // Ensure a server start triggers the setPrimary() path in ._initialize()
-      this._primaryPort = -1;
-    }
-    else
-    {
-      // No reason not to remove directly as it's not our primary location
-      this.remove("http", this._host, this._defaultPort);
-    }
-  },
-
-  /**
-   * Ensures scheme, host, and port are all valid with respect to RFC 2396.
-   *
-   * @throws NS_ERROR_ILLEGAL_VALUE
-   *   if any argument doesn't match the corresponding production
-   */
-  _validate: function(scheme, host, port)
-  {
-    if (scheme !== "http" && scheme !== "https")
-    {
-      dumpn("*** server only supports http/https schemes: '" + scheme + "'");
-      dumpStack();
-      throw Cr.NS_ERROR_ILLEGAL_VALUE;
-    }
-    if (!HOST_REGEX.test(host))
-    {
-      dumpn("*** unexpected host: '" + host + "'");
-      throw Cr.NS_ERROR_ILLEGAL_VALUE;
-    }
-    if (port < 0 || port > 65535)
-    {
-      dumpn("*** unexpected port: '" + port + "'");
-      throw Cr.NS_ERROR_ILLEGAL_VALUE;
-    }
-  }
-};
-
 
 /**
  * Represents a connection to the server (and possibly in the future the thread
@@ -1556,7 +1283,6 @@ RequestReader.prototype =
     var headers = metadata._headers;
 
     // 19.6.1.1 -- servers MUST report 400 to HTTP/1.1 requests w/o Host header
-    var identity = this._connection.server.identity;
     if (metadata._httpVersion.atLeast(nsHttpVersion.HTTP_1_1))
     {
       if (!headers.hasHeader("Host"))
@@ -1601,32 +1327,8 @@ RequestReader.prototype =
         // requested URI be absolute (and thus contain the necessary
         // information), let's assume HTTP will prevail and use that.
         port = +port || 80;
-
-        var scheme = identity.getScheme(host, port);
-        if (!scheme)
-        {
-          dumpn("*** unrecognized hostname (" + hostPort + ") in Host " +
-                "header, 400 time");
-          throw HTTP_400;
-        }
-
-        metadata._scheme = scheme;
-        metadata._host = host;
-        metadata._port = port;
       }
     }
-    else
-    {
-      NS_ASSERT(metadata._host === undefined,
-                "HTTP/1.0 doesn't allow absolute paths in the request line!");
-
-      metadata._scheme = identity.primaryScheme;
-      metadata._host = identity.primaryHost;
-      metadata._port = identity.primaryPort;
-    }
-
-    NS_ASSERT(identity.has(metadata._scheme, metadata._host, metadata._port),
-              "must have a location we recognize by now!");
   },
 
   /**
@@ -1734,8 +1436,6 @@ RequestReader.prototype =
 
 
     var fullPath = request[1];
-    var serverIdentity = this._connection.server.identity;
-
     var scheme, host, port;
 
     if (fullPath.charAt(0) != "/")
@@ -1782,9 +1482,9 @@ RequestReader.prototype =
         throw HTTP_400;
       }
 
-      if (!serverIdentity.has(scheme, host, port) || fullPath.charAt(0) != "/")
+      if (fullPath.charAt(0) != "/")
       {
-        dumpn("*** serverIdentity unknown or path does not start with '/'");
+        dumpn("*** path does not start with '/'");
         throw HTTP_400;
       }
     }
