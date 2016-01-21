@@ -43,13 +43,10 @@ this.EXPORTED_SYMBOLS = [
   "HttpServer",
 ];
 
-Components.utils.import("resource://gre/modules/XPCOMUtils.jsm");
+const { classes: Cc, interfaces: Ci, results: Cr, utils: Cu, Constructor: CC } = Components;
 
-const Cc = Components.classes;
-const Ci = Components.interfaces;
-const Cr = Components.results;
-const Cu = Components.utils;
-const CC = Components.Constructor;
+Cu.import("resource://gre/modules/XPCOMUtils.jsm");
+Cu.import("resource://gre/modules/Services.jsm");
 
 const PR_UINT32_MAX = Math.pow(2, 32) - 1;
 
@@ -676,6 +673,14 @@ nsHttpServer.prototype =
   registerContentType: function(ext, type)
   {
     this._handler.registerContentType(ext, type);
+  },
+
+  registerPathCallback: function(callback) {
+    this._handler.registerPathCallback(callback);
+  },
+
+  registerSJSFunctions: function(functions) {
+    this._handler.registerSJSFunctions(functions);
   },
 
   //
@@ -2043,6 +2048,9 @@ function ServerHandler(server)
 
   /** Entire-server state storage for nsISupports values. */
   this._objectState = {};
+
+  this._pathCallback = null;
+  this._SJSFunctions = null;
 }
 ServerHandler.prototype =
 {
@@ -2069,6 +2077,8 @@ ServerHandler.prototype =
     {
       try
       {
+        this._handleResponseFromChannel(request, response, this._pathCallback(request));
+/*
         if (path in this._overridePaths)
         {
           // explicit paths first, then files based on existing directory mappings,
@@ -2096,6 +2106,7 @@ ServerHandler.prototype =
             this._handleDefault(request, response);
           }
         }
+*/
       }
       catch (e)
       {
@@ -2251,6 +2262,14 @@ ServerHandler.prototype =
             "(" + err + ") handler -- was this intentional?");
 
     this._handlerToField(handler, this._overrideErrors, err);
+  },
+
+  registerPathCallback: function(callback) {
+    this._pathCallback = callback;
+  },
+
+  registerSJSFunctions: function(functions) {
+    this._SJSFunctions = functions;
   },
 
   //
@@ -2605,6 +2624,131 @@ ServerHandler.prototype =
             }
           }
         };
+
+      writeMore();
+
+      // Now that we know copying will start, flag the response as async.
+      response.processAsync();
+    }
+  },
+
+  _handleResponseFromChannel: function(request, response, channel) {
+    let fis = channel.open();
+
+    dump (request.path.endsWith(".sjs"));
+
+    if (request.path.endsWith(".sjs")) {
+      try {
+        let sis = new ScriptableInputStream(fis);
+        let s = Cu.Sandbox(Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal));
+        s.importFunction(dump, "dump");
+        s.importFunction(atob, "atob");
+        s.importFunction(btoa, "btoa");
+
+        // Define a basic key-value state-preservation API across requests, with
+        // keys initially corresponding to the empty string.
+        let self = this;
+        let path = request.path;
+        s.importFunction(function getState(key) {
+          return self._getState(path, key);
+        });
+        s.importFunction(function setState(key, value) {
+          self._setState(path, key, value);
+        });
+        s.importFunction(function getSharedState(key) {
+          return self._getSharedState(key);
+        });
+        s.importFunction(function setSharedState(key, value) {
+          self._setSharedState(key, value);
+        });
+
+        try {
+          // Alas, the line number in errors dumped to console when calling the
+          // request handler is simply an offset from where we load the SJS file.
+          // Work around this in a reasonably non-fragile way by dynamically
+          // getting the line number where we evaluate the SJS file.  Don't
+          // separate these two lines!
+          let line = new Error().lineNumber;
+          Cu.evalInSandbox(sis.read(fis.available()), s, "latest");
+        } catch (e) {
+          DEBUG && debug("*** syntax error in SJS at " + channel.URI.path + ": " + e);
+          throw HttpServer.HTTP_500;
+        }
+
+        try {
+          s.handleRequest(request, response);
+        } catch (e) {
+          DEBUG && debug("*** error running SJS at " + channel.URI.path + ": " +
+               e + " on line " +
+               (e instanceof Error
+                ? e.lineNumber + " in httpd.js"
+                : (e.lineNumber - line)) + "\n");
+          throw HttpServer.HTTP_500;
+        }
+      } finally {
+        fis.close();
+      }
+    } else {
+      let offset = 0;
+      let count = fis.available();
+
+      if (request.path.endsWith(".css")) {
+        response.setHeader("Content-Type", "text/css;charset=utf-8", false);
+      } else {
+        response.setHeader("Content-Type", "text/html;charset=utf-8", false);
+      }
+      response.setHeader("Content-Length", "" + count, false);
+
+      try {
+        if (offset !== 0) {
+          // Seek (or read, if seeking isn't supported) to the correct offset so
+          // the data sent to the client matches the requested range.
+          if (fis instanceof Ci.nsISeekableStream) {
+            fis.seek(Ci.nsISeekableStream.NS_SEEK_SET, offset);
+          } else {
+            new ScriptableInputStream(fis).read(offset);
+          }
+        }
+      } catch (e) {
+        fis.close();
+        throw e;
+      }
+
+      let writeMore = function () {
+        Services.tm.currentThread
+            .dispatch(writeData, Ci.nsIThread.DISPATCH_NORMAL);
+      }
+
+      let input = new BinaryInputStream(fis);
+      let output = new BinaryOutputStream(response.bodyOutputStream);
+      let writeData = {
+        run: function() {
+          let chunkSize = Math.min(65536, count);
+          count -= chunkSize;
+          NS_ASSERT(count >= 0, "underflow");
+
+          try {
+            let data = input.readByteArray(chunkSize);
+            NS_ASSERT(data.length === chunkSize,
+                      "incorrect data returned?  got " + data.length +
+                      ", expected " + chunkSize);
+            output.writeByteArray(data, data.length);
+            if (count === 0) {
+              fis.close();
+              response.finish();
+            } else {
+              writeMore();
+            }
+          } catch (e) {
+            try {
+              fis.close();
+            } finally {
+              response.finish();
+            }
+            throw e;
+          }
+        }
+      };
 
       writeMore();
 

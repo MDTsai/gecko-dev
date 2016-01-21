@@ -116,9 +116,23 @@ this.RemoteControlService = {
 
     // We use URI to access file, not point to a directory
     // So we handle all request from prefix "/"
+    /*
     this._httpServer.registerPrefixHandler("/", function(request, response) {
       RemoteControlService._handleRequest(request, response);
     });
+    */
+
+    try {
+      this._httpServer.registerPathCallback(this._pathCallback);
+      this._httpServer.registerSJSFunctions({
+        "getPIN": this._getPIN,
+        "clearPIN": this._clearPIN,
+        "generateUUID": this._generateUUID,
+        "isValidUUID": this._isValidUUID,
+        "isPairingRequired": this._isPairingRequired,
+        "hasValidUUIDInCookie": this._hasValidUUIDInCookie,
+      });
+    } catch (e) { debug(e.message); }
 
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
@@ -406,10 +420,11 @@ this.RemoteControlService = {
 
   // Generate UUID and expire timestamp
   _generateUUID: function() {
+    let self = RemoteControlService;
     let uuidString = UUIDGenerator.generateUUID().toString();
-    let timeStamp = ((new Date().getTime()) + this._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
+    let timeStamp = ((new Date().getTime()) + self._UUID_expire_days * 24 * 60 * 60 * 1000).toString();
     let lock = SettingsService.createLock();
-    let uuids = this._uuids;
+    let uuids = self._uuids;
 
     uuids[uuidString] = timeStamp;
 
@@ -417,7 +432,7 @@ this.RemoteControlService = {
     for (let uuid in uuids) {
       let now = new Date().getTime();
       if (now > parseInt(uuids[uuid])) {
-        delete this._uuids[uuid];
+        delete self._uuids[uuid];
       }
     }
 
@@ -427,7 +442,7 @@ this.RemoteControlService = {
   },
 
   _isValidUUID: function(uuid) {
-    return (uuid in this._uuids);
+    return (uuid in RemoteControlService._uuids);
   },
 
   _updateUUID: function(uuid, timestamp) {
@@ -452,6 +467,10 @@ this.RemoteControlService = {
     lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
   },
 
+  _isPairingRequired: function() {
+    return RemoteControlService._pairingRequired;
+  },
+
   _zeroFill: function(number, width) {
     width -= number.toString().length;
     if ( width > 0 )
@@ -468,11 +487,11 @@ this.RemoteControlService = {
   },
 
   _getPIN: function() {
-    return this._pin;
+    return RemoteControlService._pin;
   },
 
   _clearPIN: function() {
-    this._pin = null;
+    RemoteControlService._pin = null;
   },
 
   // Check incoming path is valid or not
@@ -495,6 +514,25 @@ this.RemoteControlService = {
       return true;
     } catch (e) {}
     return false;
+  },
+
+  _pathCallback: function(request) {
+    let self = RemoteControlService;
+    if (self._static_request_blacklist.indexOf(request.path) >= 0) {
+      // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
+      // For other static files in Gaia, they change frequently. So we don't use whitelist here.
+      throw HttpServer.HTTP_500;
+    } else if (self._sjs_request_whitelist.indexOf(request.path) >= 0) {
+      // For server script, we only accept these files for dispatch event and pairing only, so use whitelist
+      return Services.io.newChannel(self._server_script_prepath + request.path, null, null);
+    } else if (self._isValidPath(request.path)) {
+      // Handle static files request
+      let path = self._transferRequestToPath(request);
+      let baseURI = Services.io.newURI(self._client_page_prepath, null, null);
+      return Services.io.newChannel(path, null, baseURI);
+    } else {
+      throw HttpServer.HTTP_500;
+    }
   },
 
   _handleRequest: function(request, response) {
@@ -528,7 +566,7 @@ this.RemoteControlService = {
       let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
 
       cookieName = cookieName.replace(/^\s+|\s+$/g, "");
-      if (cookieName == "uuid" && this._isValidUUID(cookieValue)) {
+      if (cookieName == "uuid" && RemoteControlService._isValidUUID(cookieValue)) {
         return true;
       }
     }
