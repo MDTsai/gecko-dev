@@ -114,25 +114,18 @@ this.RemoteControlService = {
     // Listen pairing_required changes from Gecko preference
     Services.prefs.addObserver("remotecontrol.service.pairing_required", this, false);
 
-    // We use URI to access file, not point to a directory
-    // So we handle all request from prefix "/"
-    /*
-    this._httpServer.registerPrefixHandler("/", function(request, response) {
-      RemoteControlService._handleRequest(request, response);
-    });
-    */
+    // Register path to channel callback for Remote Control Service's logic
+    this._httpServer.registerPathCallback(this._pathCallback);
 
-    try {
-      this._httpServer.registerPathCallback(this._pathCallback);
-      this._httpServer.registerSJSFunctions({
-        "getPIN": this._getPIN,
-        "clearPIN": this._clearPIN,
-        "generateUUID": this._generateUUID,
-        "isValidUUID": this._isValidUUID,
-        "isPairingRequired": this._isPairingRequired,
-        "hasValidUUIDInCookie": this._hasValidUUIDInCookie,
-      });
-    } catch (e) { debug(e.message); }
+    // Register internal functions export to SJS
+    this._httpServer.registerSJSFunctions({
+      "getPIN": this._getPIN,
+      "clearPIN": this._clearPIN,
+      "generateUUID": this._generateUUID,
+      "isValidUUID": this._isValidUUID,
+      "isPairingRequired": this._isPairingRequired,
+      "hasValidUUIDInCookie": this._hasValidUUIDInCookie,
+    });
 
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
@@ -383,42 +376,8 @@ this.RemoteControlService = {
     }
   },
 
-  // Clone get/set state/sharedState from httpd.js for runtime state
-  _getState: function(path, key) {
-    let state = this._state;
-    if (path in state && key in state[path]) {
-      return state[path][key];
-    }
-    return "";
-  },
-
-  _setState: function(path, key, value) {
-    if (typeof value !== "string") {
-      throw new Error("non-string value passed");
-    }
-    let state = this._state;
-    if (!(path in state)) {
-      state[path] = {};
-    }
-    state[path][key] = value;
-  },
-
-  _getSharedState: function(key) {
-    let state = this._sharedState;
-    if (key in state) {
-      return state[key];
-    }
-    return "";
-  },
-
-  _setSharedState: function(key, value) {
-    if (typeof value !== "string") {
-      throw new Error("non-string value passed");
-    }
-    this._sharedState[key] = value;
-  },
-
   // Generate UUID and expire timestamp
+  // Export to SJS
   _generateUUID: function() {
     let self = RemoteControlService;
     let uuidString = UUIDGenerator.generateUUID().toString();
@@ -441,6 +400,7 @@ this.RemoteControlService = {
     return uuidString;
   },
 
+  // Export to SJS
   _isValidUUID: function(uuid) {
     return (uuid in RemoteControlService._uuids);
   },
@@ -467,6 +427,7 @@ this.RemoteControlService = {
     lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
   },
 
+  // Export to SJS
   _isPairingRequired: function() {
     return RemoteControlService._pairingRequired;
   },
@@ -486,10 +447,12 @@ this.RemoteControlService = {
     return this._pin;
   },
 
+  // Export to SJS
   _getPIN: function() {
     return RemoteControlService._pin;
   },
 
+  // Export to SJS
   _clearPIN: function() {
     RemoteControlService._pin = null;
   },
@@ -516,8 +479,10 @@ this.RemoteControlService = {
     return false;
   },
 
+  // For RemoteControlHTTPd receives a request, retrieve a channel from _pathCallback for response
   _pathCallback: function(request) {
     let self = RemoteControlService;
+
     if (self._static_request_blacklist.indexOf(request.path) >= 0) {
       // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
       // For other static files in Gaia, they change frequently. So we don't use whitelist here.
@@ -535,22 +500,7 @@ this.RemoteControlService = {
     }
   },
 
-  _handleRequest: function(request, response) {
-    if (this._static_request_blacklist.indexOf(request.path) >= 0) {
-      // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
-      // For other static files in Gaia, they change frequently. So we don't use whitelist here.
-      throw HttpServer.HTTP_500;
-    } else if (this._sjs_request_whitelist.indexOf(request.path) >= 0) {
-      // For server script, we only accept these files for dispatch event and pairing only, so use whitelist
-      this._handleSJSRequest(request, response);
-    } else if (this._isValidPath(request.path)) {
-      // Handle static files request
-      this._handleStaticRequest(request, response);
-    } else {
-      throw HttpServer.HTTP_500;
-    }
-  },
-
+  // Export to SJS
   _hasValidUUIDInCookie: function(request) {
     // Return false if there is no cookie in header
     if (!request.hasHeader("Cookie")) {
@@ -593,163 +543,6 @@ this.RemoteControlService = {
       }
     } else {
       return request.path;
-    }
-  },
-
-  // Clone from _writeFileResponse in httpd.js and split to two part:
-  // handleStaticRequest and handleStaticSJSRequest
-  // Modify to nsIURI and nsIChannel to access file in remotecontrol client app
-  _handleStaticRequest: function(request, response) {
-    const PR_RDONLY = 0x01;
-    const PERMS_READONLY = (4 << 6) | (4 << 3) | 4;
-
-    let path = this._transferRequestToPath(request);
-    let baseURI = Services.io.newURI(this._client_page_prepath, null, null);
-    let channel = Services.io.newChannel(path, null, baseURI);
-    let fis = channel.open();
-
-    let offset = 0;
-    let count = fis.available();
-
-    if (path.endsWith(".css")) {
-      response.setHeader("Content-Type", "text/css;charset=utf-8", false);
-    } else {
-      response.setHeader("Content-Type", "text/html;charset=utf-8", false);
-    }
-    response.setHeader("Content-Length", "" + count, false);
-
-    try {
-      if (offset !== 0) {
-        // Seek (or read, if seeking isn't supported) to the correct offset so
-        // the data sent to the client matches the requested range.
-        if (fis instanceof Ci.nsISeekableStream) {
-          fis.seek(Ci.nsISeekableStream.NS_SEEK_SET, offset);
-        } else {
-          new ScriptableInputStream(fis).read(offset);
-        }
-      }
-    } catch (e) {
-      fis.close();
-      throw e;
-    }
-
-    let writeMore = function () {
-      Services.tm.currentThread
-          .dispatch(writeData, Ci.nsIThread.DISPATCH_NORMAL);
-    }
-
-    let input = new BinaryInputStream(fis);
-    let output = new BinaryOutputStream(response.bodyOutputStream);
-    let writeData = {
-      run: function() {
-        let chunkSize = Math.min(65536, count);
-        count -= chunkSize;
-        NS_ASSERT(count >= 0, "underflow");
-
-        try {
-          let data = input.readByteArray(chunkSize);
-          NS_ASSERT(data.length === chunkSize,
-                    "incorrect data returned?  got " + data.length +
-                    ", expected " + chunkSize);
-          output.writeByteArray(data, data.length);
-          if (count === 0) {
-            fis.close();
-            response.finish();
-          } else {
-            writeMore();
-          }
-        } catch (e) {
-          try {
-            fis.close();
-          } finally {
-            response.finish();
-          }
-          throw e;
-        }
-      }
-    };
-
-    writeMore();
-
-    // Now that we know copying will start, flag the response as async.
-    response.processAsync();
-  },
-
-  _handleSJSRequest: function(request, response) {
-    // By default server_script prepath is resource://gre/res/remotecontol
-    // If we prepath as baseURI, only gre will be reserved.
-    // So use string concat here, but use new API like flyweb, should avoid such usage
-    let channel = Services.io.newChannel(this._server_script_prepath + request.path, null, null);
-    let fis = channel.open();
-
-    try {
-      let sis = new ScriptableInputStream(fis);
-      let s = Cu.Sandbox(Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal));
-      s.importFunction(dump, "dump");
-      s.importFunction(atob, "atob");
-      s.importFunction(btoa, "btoa");
-
-      // Define a basic key-value state-preservation API across requests, with
-      // keys initially corresponding to the empty string.
-      let self = RemoteControlService;
-      let path = request.path;
-      s.importFunction(function getState(key) {
-        return self._getState(path, key);
-      });
-      s.importFunction(function setState(key, value) {
-        self._setState(path, key, value);
-      });
-      s.importFunction(function getSharedState(key) {
-        return self._getSharedState(key);
-      });
-      s.importFunction(function setSharedState(key, value) {
-        self._setSharedState(key, value);
-      });
-      // Import PIN and UUID related function for sjs in sandbox
-      s.importFunction(function getPIN() {
-        return self._getPIN();
-      });
-      s.importFunction(function clearPIN() {
-        self._clearPIN();
-      });
-      s.importFunction(function generateUUID() {
-        return self._generateUUID();
-      });
-      s.importFunction(function isValidUUID(uuid) {
-        return self._isValidUUID(uuid);
-      });
-      s.importFunction(function isPairingRequired() {
-        return self._pairingRequired;
-      });
-      s.importFunction(function hasValidUUIDInCookie(httpRequest) {
-        return self._hasValidUUIDInCookie(httpRequest);
-      });
-
-      try {
-        // Alas, the line number in errors dumped to console when calling the
-        // request handler is simply an offset from where we load the SJS file.
-        // Work around this in a reasonably non-fragile way by dynamically
-        // getting the line number where we evaluate the SJS file.  Don't
-        // separate these two lines!
-        let line = new Error().lineNumber;
-        Cu.evalInSandbox(sis.read(fis.available()), s, "latest");
-      } catch (e) {
-        DEBUG && debug("*** syntax error in SJS at " + channel.URI.path + ": " + e);
-        throw HttpServer.HTTP_500;
-      }
-
-      try {
-        s.handleRequest(request, response);
-      } catch (e) {
-        DEBUG && debug("*** error running SJS at " + channel.URI.path + ": " +
-             e + " on line " +
-             (e instanceof Error
-              ? e.lineNumber + " in httpd.js"
-              : (e.lineNumber - line)) + "\n");
-        throw HttpServer.HTTP_500;
-      }
-    } finally {
-      fis.close();
     }
   },
 };

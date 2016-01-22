@@ -142,24 +142,6 @@ function range(x, y)
 /** An object (hash) whose fields are the numbers of all HTTP error codes. */
 const HTTP_ERROR_CODES = array2obj(range(400, 417).concat(range(500, 505)));
 
-
-/**
- * The character used to distinguish hidden files from non-hidden files, a la
- * the leading dot in Apache.  Since that mechanism also hides files from
- * easy display in LXR, ls output, etc. however, we choose instead to use a
- * suffix character.  If a requested file ends with it, we append another
- * when getting the file on the server.  If it doesn't, we just look up that
- * file.  Therefore, any file whose name ends with exactly one of the character
- * is "hidden" and available for use by the server.
- */
-const HIDDEN_CHAR = "^";
-
-/**
- * The file name suffix indicating the file containing overridden headers for
- * a requested file.
- */
-const HEADERS_SUFFIX = HIDDEN_CHAR + "headers" + HIDDEN_CHAR;
-
 /** Type used to denote SJS scripts for CGI-like functionality. */
 const SJS_TYPE = "sjs";
 
@@ -331,26 +313,6 @@ function toDateString(date)
 }
 
 /**
- * Prints out a human-readable representation of the object o and its fields,
- * omitting those whose names begin with "_" if showMembers != true (to ignore
- * "private" properties exposed via getters/setters).
- */
-function printObj(o, showMembers)
-{
-  var s = "******************************\n";
-  s +=    "o = {\n";
-  for (var i in o)
-  {
-    if (typeof(i) != "string" ||
-        (showMembers || (i.length > 0 && i[0] != "_")))
-      s+= "      " + i + ": " + o[i] + ",\n";
-  }
-  s +=    "    };\n";
-  s +=    "******************************";
-  dumpn(s);
-}
-
-/**
  * Instantiates a new HTTP server.
  */
 function nsHttpServer()
@@ -477,24 +439,6 @@ nsHttpServer.prototype =
     if (this._hasOpenConnections()) {
       dumpn("*** open connections!!!");
     }
-    if (!this._hasOpenConnections())
-    {
-      dumpn("*** no open connections, notifying async from onStopListening");
-
-      // Notify asynchronously so that any pending teardown in stop() has a
-      // chance to run first.
-      var self = this;
-      var stopEvent =
-        {
-          run: function()
-          {
-            dumpn("*** _notifyStopped async callback");
-            self._notifyStopped();
-          }
-        };
-      gThreadManager.currentThread
-                    .dispatch(stopEvent, Ci.nsIThread.DISPATCH_NORMAL);
-    }
   },
 
   // NSIHTTPSERVER
@@ -606,75 +550,6 @@ nsHttpServer.prototype =
     // socket-close notification and pending request completion happen async
   },
 
-  //
-  // see nsIHttpServer.registerFile
-  //
-  registerFile: function(path, file)
-  {
-    if (file && (!file.exists() || file.isDirectory()))
-      throw Cr.NS_ERROR_INVALID_ARG;
-
-    this._handler.registerFile(path, file);
-  },
-
-  //
-  // see nsIHttpServer.registerDirectory
-  //
-  registerDirectory: function(path, directory)
-  {
-    // XXX true path validation!
-    if (path.charAt(0) != "/" ||
-        path.charAt(path.length - 1) != "/" ||
-        (directory &&
-         (!directory.exists() || !directory.isDirectory())))
-      throw Cr.NS_ERROR_INVALID_ARG;
-
-    // XXX determine behavior of nonexistent /foo/bar when a /foo/bar/ mapping
-    //     exists!
-
-    this._handler.registerDirectory(path, directory);
-  },
-
-  //
-  // see nsIHttpServer.registerPathHandler
-  //
-  registerPathHandler: function(path, handler)
-  {
-    this._handler.registerPathHandler(path, handler);
-  },
-
-  //
-  // see nsIHttpServer.registerPrefixHandler
-  //
-  registerPrefixHandler: function(prefix, handler)
-  {
-    this._handler.registerPrefixHandler(prefix, handler);
-  },
-
-  //
-  // see nsIHttpServer.registerErrorHandler
-  //
-  registerErrorHandler: function(code, handler)
-  {
-    this._handler.registerErrorHandler(code, handler);
-  },
-
-  //
-  // see nsIHttpServer.setIndexHandler
-  //
-  setIndexHandler: function(handler)
-  {
-    this._handler.setIndexHandler(handler);
-  },
-
-  //
-  // see nsIHttpServer.registerContentType
-  //
-  registerContentType: function(ext, type)
-  {
-    this._handler.registerContentType(ext, type);
-  },
-
   registerPathCallback: function(callback) {
     this._handler.registerPathCallback(callback);
   },
@@ -731,23 +606,6 @@ nsHttpServer.prototype =
     return this._handler._setObjectState(k, v);
   },
 
-
-  // NSISUPPORTS
-
-  //
-  // see nsISupports.QueryInterface
-  //
-  QueryInterface: function(iid)
-  {
-    if (iid.equals(Ci.nsIHttpServer) ||
-        iid.equals(Ci.nsIServerSocketListener) ||
-        iid.equals(Ci.nsISupports))
-      return this;
-
-    throw Cr.NS_ERROR_NO_INTERFACE;
-  },
-
-
   // NON-XPCOM PUBLIC API
 
   /**
@@ -777,33 +635,6 @@ nsHttpServer.prototype =
     return false;
   },
 
-  /** Calls the server-stopped callback provided when stop() was called. */
-  _notifyStopped: function()
-  {
-    NS_ASSERT(this._stopCallback !== null, "double-notifying?");
-    NS_ASSERT(!this._hasOpenConnections(), "should be done serving by now");
-
-    //
-    // NB: We have to grab this now, null out the member, *then* call the
-    //     callback here, or otherwise the callback could (indirectly) futz with
-    //     this._stopCallback by starting and immediately stopping this, at
-    //     which point we'd be nulling out a field we no longer have a right to
-    //     modify.
-    //
-    var callback = this._stopCallback;
-    this._stopCallback = null;
-    try
-    {
-      callback();
-    }
-    catch (e)
-    {
-      // not throwing because this is specified as being usually (but not
-      // always) asynchronous
-      dump("!!! error running onStopped callback: " + e + "\n");
-    }
-  },
-
   /**
    * Notifies this server that the given connection has been closed.
    *
@@ -820,9 +651,6 @@ nsHttpServer.prototype =
               this._connections[connection.number]);
     delete this._connections[connection.number];
 
-    // Fire a pending server-stopped notification if it's our responsibility.
-    if (!this._hasOpenConnections() && this._socketClosed)
-      this._notifyStopped();
     // Bug 508125: Add a GC here else we'll use gigabytes of memory running
     // mochitests. We can't rely on xpcshell doing an automated GC, as that
     // would interfere with testing GC stuff...
@@ -993,22 +821,17 @@ Connection.prototype =
   }
 };
 
-
-
 /** Returns an array of count bytes from the given input stream. */
 function readBytes(inputStream, count)
 {
   return new BinaryInputStream(inputStream).readByteArray(count);
 }
 
-
-
 /** Request reader processing states; see RequestReader for details. */
 const READER_IN_REQUEST_LINE = 0;
 const READER_IN_HEADERS      = 1;
 const READER_IN_BODY         = 2;
 const READER_FINISHED        = 3;
-
 
 /**
  * Reads incoming request data asynchronously, does any necessary preprocessing,
@@ -1133,19 +956,6 @@ RequestReader.prototype =
     if (this._state != READER_FINISHED)
       input.asyncWait(this, 0, 0, gThreadManager.currentThread);
   },
-
-  //
-  // see nsISupports.QueryInterface
-  //
-  QueryInterface: function(aIID)
-  {
-    if (aIID.equals(Ci.nsIInputStreamCallback) ||
-        aIID.equals(Ci.nsISupports))
-      return this;
-
-    throw Cr.NS_ERROR_NO_INTERFACE;
-  },
-
 
   // PRIVATE API
 
@@ -1764,213 +1574,7 @@ function createHandlerFunc(handler)
   return function(metadata, response) { handler.handle(metadata, response); };
 }
 
-
-/**
- * The default handler for directories; writes an HTML response containing a
- * slightly-formatted directory listing.
- */
-function defaultIndexHandler(metadata, response)
-{
-  response.setHeader("Content-Type", "text/html;charset=utf-8", false);
-
-  var path = htmlEscape(decodeURI(metadata.path));
-
-  //
-  // Just do a very basic bit of directory listings -- no need for too much
-  // fanciness, especially since we don't have a style sheet in which we can
-  // stick rules (don't want to pollute the default path-space).
-  //
-
-  var body = '<html>\
-                <head>\
-                  <title>' + path + '</title>\
-                </head>\
-                <body>\
-                  <h1>' + path + '</h1>\
-                  <ol style="list-style-type: none">';
-
-  var directory = metadata.getProperty("directory");
-  NS_ASSERT(directory && directory.isDirectory());
-
-  var fileList = [];
-  var files = directory.directoryEntries;
-  while (files.hasMoreElements())
-  {
-    var f = files.getNext().QueryInterface(Ci.nsIFile);
-    var name = f.leafName;
-    if (!f.isHidden() &&
-        (name.charAt(name.length - 1) != HIDDEN_CHAR ||
-         name.charAt(name.length - 2) == HIDDEN_CHAR))
-      fileList.push(f);
-  }
-
-  fileList.sort(fileSort);
-
-  for (var i = 0; i < fileList.length; i++)
-  {
-    var file = fileList[i];
-    try
-    {
-      var name = file.leafName;
-      if (name.charAt(name.length - 1) == HIDDEN_CHAR)
-        name = name.substring(0, name.length - 1);
-      var sep = file.isDirectory() ? "/" : "";
-
-      // Note: using " to delimit the attribute here because encodeURIComponent
-      //       passes through '.
-      var item = '<li><a href="' + encodeURIComponent(name) + sep + '">' +
-                   htmlEscape(name) + sep +
-                 '</a></li>';
-
-      body += item;
-    }
-    catch (e) { /* some file system error, ignore the file */ }
-  }
-
-  body    += '    </ol>\
-                </body>\
-              </html>';
-
-  response.bodyOutputStream.write(body, body.length);
-}
-
-/**
- * Sorts a and b (nsIFile objects) into an aesthetically pleasing order.
- */
-function fileSort(a, b)
-{
-  var dira = a.isDirectory(), dirb = b.isDirectory();
-
-  if (dira && !dirb)
-    return -1;
-  if (dirb && !dira)
-    return 1;
-
-  var namea = a.leafName.toLowerCase(), nameb = b.leafName.toLowerCase();
-  return nameb > namea ? -1 : 1;
-}
-
-
-/**
- * Converts an externally-provided path into an internal path for use in
- * determining file mappings.
- *
- * @param path
- *   the path to convert
- * @param encoded
- *   true if the given path should be passed through decodeURI prior to
- *   conversion
- * @throws URIError
- *   if path is incorrectly encoded
- */
-function toInternalPath(path, encoded)
-{
-  if (encoded)
-    path = decodeURI(path);
-
-  var comps = path.split("/");
-  for (var i = 0, sz = comps.length; i < sz; i++)
-  {
-    var comp = comps[i];
-    if (comp.charAt(comp.length - 1) == HIDDEN_CHAR)
-      comps[i] = comp + HIDDEN_CHAR;
-  }
-  return comps.join("/");
-}
-
 const PERMS_READONLY = (4 << 6) | (4 << 3) | 4;
-
-/**
- * Adds custom-specified headers for the given file to the given response, if
- * any such headers are specified.
- *
- * @param file
- *   the file on the disk which is to be written
- * @param metadata
- *   metadata about the incoming request
- * @param response
- *   the Response to which any specified headers/data should be written
- * @throws HTTP_500
- *   if an error occurred while processing custom-specified headers
- */
-function maybeAddHeaders(file, metadata, response)
-{
-  var name = file.leafName;
-  if (name.charAt(name.length - 1) == HIDDEN_CHAR)
-    name = name.substring(0, name.length - 1);
-
-  var headerFile = file.parent;
-  headerFile.append(name + HEADERS_SUFFIX);
-
-  if (!headerFile.exists())
-    return;
-
-  const PR_RDONLY = 0x01;
-  var fis = new FileInputStream(headerFile, PR_RDONLY, PERMS_READONLY,
-                                Ci.nsIFileInputStream.CLOSE_ON_EOF);
-
-  try
-  {
-    var lis = new ConverterInputStream(fis, "UTF-8", 1024, 0x0);
-    lis.QueryInterface(Ci.nsIUnicharLineInputStream);
-
-    var line = {value: ""};
-    var more = lis.readLine(line);
-
-    if (!more && line.value == "")
-      return;
-
-
-    // request line
-
-    var status = line.value;
-    if (status.indexOf("HTTP ") == 0)
-    {
-      status = status.substring(5);
-      var space = status.indexOf(" ");
-      var code, description;
-      if (space < 0)
-      {
-        code = status;
-        description = "";
-      }
-      else
-      {
-        code = status.substring(0, space);
-        description = status.substring(space + 1, status.length);
-      }
-
-      response.setStatusLine(metadata.httpVersion, parseInt(code, 10), description);
-
-      line.value = "";
-      more = lis.readLine(line);
-    }
-
-    // headers
-    while (more || line.value != "")
-    {
-      var header = line.value;
-      var colon = header.indexOf(":");
-
-      response.setHeader(header.substring(0, colon),
-                         header.substring(colon + 1, header.length),
-                         false); // allow overriding server-set headers
-
-      line.value = "";
-      more = lis.readLine(line);
-    }
-  }
-  catch (e)
-  {
-    dumpn("WARNING: error in headers for " + metadata.path + ": " + e);
-    throw HTTP_500;
-  }
-  finally
-  {
-    fis.close();
-  }
-}
-
 
 /**
  * An object which handles requests for a server, executing default and
@@ -1990,55 +1594,6 @@ function ServerHandler(server)
    * The nsHttpServer instance associated with this handler.
    */
   this._server = server;
-
-  /**
-   * A FileMap object containing the set of path->nsILocalFile mappings for
-   * all directory mappings set in the server (e.g., "/" for /var/www/html/,
-   * "/foo/bar/" for /local/path/, and "/foo/bar/baz/" for /local/path2).
-   *
-   * Note carefully: the leading and trailing "/" in each path (not file) are
-   * removed before insertion to simplify the code which uses this.  You have
-   * been warned!
-   */
-  this._pathDirectoryMap = new FileMap();
-
-  /**
-   * Custom request handlers for the server in which this resides.  Path-handler
-   * pairs are stored as property-value pairs in this property.
-   *
-   * @see ServerHandler.prototype._defaultPaths
-   */
-  this._overridePaths = {};
-
-  /**
-   * Custom request handlers for the path prefixes on the server in which this
-   * resides.  Path-handler pairs are stored as property-value pairs in this
-   * property.
-   *
-   * @see ServerHandler.prototype._defaultPaths
-   */
-  this._overridePrefixes = {};
-
-  /**
-   * Custom request handlers for the error handlers in the server in which this
-   * resides.  Path-handler pairs are stored as property-value pairs in this
-   * property.
-   *
-   * @see ServerHandler.prototype._defaultErrors
-   */
-  this._overrideErrors = {};
-
-  /**
-   * Maps file extensions to their MIME types in the server, overriding any
-   * mapping that might or might not exist in the MIME service.
-   */
-  this._mimeMappings = {};
-
-  /**
-   * The default handler for requests for directories, used to serve directories
-   * when no index file is present.
-   */
-  this._indexHandler = defaultIndexHandler;
 
   /** Per-path state storage for the server. */
   this._state = {};
@@ -2078,35 +1633,6 @@ ServerHandler.prototype =
       try
       {
         this._handleResponseFromChannel(request, response, this._pathCallback(request));
-/*
-        if (path in this._overridePaths)
-        {
-          // explicit paths first, then files based on existing directory mappings,
-          // then (if the file doesn't exist) built-in server default paths
-          dumpn("calling override for " + path);
-          this._overridePaths[path](request, response);
-        }
-        else
-        {
-          var longestPrefix = "";
-          for (let prefix in this._overridePrefixes) {
-            if (prefix.length > longestPrefix.length &&
-                path.substr(0, prefix.length) == prefix)
-            {
-              longestPrefix = prefix;
-            }
-          }
-          if (longestPrefix.length > 0)
-          {
-            dumpn("calling prefix override for " + longestPrefix);
-            this._overridePrefixes[longestPrefix](request, response);
-          }
-          else
-          {
-            this._handleDefault(request, response);
-          }
-        }
-*/
       }
       catch (e)
       {
@@ -2121,16 +1647,7 @@ ServerHandler.prototype =
           dumpn("*** unexpected error: e == " + e);
           throw HTTP_500;
         }
-        if (e.code !== 404)
-          throw e;
-
-        dumpn("*** default: " + (path in this._defaultPaths));
-
-        response = new Response(connection);
-        if (path in this._defaultPaths)
-          this._defaultPaths[path](request, response);
-        else
-          throw HTTP_404;
+        throw e;
       }
     }
     catch (e)
@@ -2171,99 +1688,6 @@ ServerHandler.prototype =
     response.complete();
   },
 
-  //
-  // see nsIHttpServer.registerFile
-  //
-  registerFile: function(path, file)
-  {
-    if (!file)
-    {
-      dumpn("*** unregistering '" + path + "' mapping");
-      delete this._overridePaths[path];
-      return;
-    }
-
-    dumpn("*** registering '" + path + "' as mapping to " + file.path);
-    file = file.clone();
-
-    var self = this;
-    this._overridePaths[path] =
-      function(request, response)
-      {
-        if (!file.exists())
-          throw HTTP_404;
-
-        response.setStatusLine(request.httpVersion, 200, "OK");
-        self._writeFileResponse(request, file, response, 0, file.fileSize);
-      };
-  },
-
-  //
-  // see nsIHttpServer.registerPathHandler
-  //
-  registerPathHandler: function(path, handler)
-  {
-    // XXX true path validation!
-    if (path.charAt(0) != "/")
-      throw Cr.NS_ERROR_INVALID_ARG;
-
-    this._handlerToField(handler, this._overridePaths, path);
-  },
-
-  //
-  // see nsIHttpServer.registerPrefixHandler
-  //
-  registerPrefixHandler: function(path, handler)
-  {
-    // XXX true path validation!
-    if (path.charAt(0) != "/" || path.charAt(path.length - 1) != "/")
-      throw Cr.NS_ERROR_INVALID_ARG;
-
-    this._handlerToField(handler, this._overridePrefixes, path);
-  },
-
-  //
-  // see nsIHttpServer.registerDirectory
-  //
-  registerDirectory: function(path, directory)
-  {
-    // strip off leading and trailing '/' so that we can use lastIndexOf when
-    // determining exactly how a path maps onto a mapped directory --
-    // conditional is required here to deal with "/".substring(1, 0) being
-    // converted to "/".substring(0, 1) per the JS specification
-    var key = path.length == 1 ? "" : path.substring(1, path.length - 1);
-
-    // the path-to-directory mapping code requires that the first character not
-    // be "/", or it will go into an infinite loop
-    if (key.charAt(0) == "/")
-      throw Cr.NS_ERROR_INVALID_ARG;
-
-    key = toInternalPath(key, false);
-
-    if (directory)
-    {
-      dumpn("*** mapping '" + path + "' to the location " + directory.path);
-      this._pathDirectoryMap.put(key, directory);
-    }
-    else
-    {
-      dumpn("*** removing mapping for '" + path + "'");
-      this._pathDirectoryMap.put(key, null);
-    }
-  },
-
-  //
-  // see nsIHttpServer.registerErrorHandler
-  //
-  registerErrorHandler: function(err, handler)
-  {
-    if (!(err in HTTP_ERROR_CODES))
-      dumpn("*** WARNING: registering non-HTTP/1.1 error code " +
-            "(" + err + ") handler -- was this intentional?");
-
-    this._handlerToField(handler, this._overrideErrors, err);
-  },
-
   registerPathCallback: function(callback) {
     this._pathCallback = callback;
   },
@@ -2271,168 +1695,8 @@ ServerHandler.prototype =
   registerSJSFunctions: function(functions) {
     this._SJSFunctions = functions;
   },
-
-  //
-  // see nsIHttpServer.setIndexHandler
-  //
-  setIndexHandler: function(handler)
-  {
-    if (!handler)
-      handler = defaultIndexHandler;
-    else if (typeof(handler) != "function")
-      handler = createHandlerFunc(handler);
-
-    this._indexHandler = handler;
-  },
-
-  //
-  // see nsIHttpServer.registerContentType
-  //
-  registerContentType: function(ext, type)
-  {
-    if (!type)
-      delete this._mimeMappings[ext];
-    else
-      this._mimeMappings[ext] = headerUtils.normalizeFieldValue(type);
-  },
-
+  
   // PRIVATE API
-
-  /**
-   * Sets or remove (if handler is null) a handler in an object with a key.
-   *
-   * @param handler
-   *   a handler, either function or an nsIHttpRequestHandler
-   * @param dict
-   *   The object to attach the handler to.
-   * @param key
-   *   The field name of the handler.
-   */
-  _handlerToField: function(handler, dict, key)
-  {
-    // for convenience, handler can be a function if this is run from xpcshell
-    if (typeof(handler) == "function")
-      dict[key] = handler;
-    else if (handler)
-      dict[key] = createHandlerFunc(handler);
-    else
-      delete dict[key];
-  },
-
-  /**
-   * Handles a request which maps to a file in the local filesystem (if a base
-   * path has already been set; otherwise the 404 error is thrown).
-   *
-   * @param metadata : Request
-   *   metadata for the incoming request
-   * @param response : Response
-   *   an uninitialized Response to the given request, to be initialized by a
-   *   request handler
-   * @throws HTTP_###
-   *   if an HTTP error occurred (usually HTTP_404); note that in this case the
-   *   calling code must handle post-processing of the response
-   */
-  _handleDefault: function(metadata, response)
-  {
-    dumpn("*** _handleDefault()");
-
-    response.setStatusLine(metadata.httpVersion, 200, "OK");
-
-    var path = metadata.path;
-    NS_ASSERT(path.charAt(0) == "/", "invalid path: <" + path + ">");
-
-    // determine the actual on-disk file; this requires finding the deepest
-    // path-to-directory mapping in the requested URL
-    var file = this._getFileForPath(path);
-
-    // the "file" might be a directory, in which case we either serve the
-    // contained index.html or make the index handler write the response
-    if (file.exists() && file.isDirectory())
-    {
-      file.append("index.html"); // make configurable?
-      if (!file.exists() || file.isDirectory())
-      {
-        metadata._ensurePropertyBag();
-        metadata._bag.setPropertyAsInterface("directory", file.parent);
-        this._indexHandler(metadata, response);
-        return;
-      }
-    }
-
-    // alternately, the file might not exist
-    if (!file.exists())
-      throw HTTP_404;
-
-    var start, end;
-    if (metadata._httpVersion.atLeast(nsHttpVersion.HTTP_1_1) &&
-        metadata.hasHeader("Range") &&
-        this._getTypeFromFile(file) !== SJS_TYPE)
-    {
-      var rangeMatch = metadata.getHeader("Range").match(/^bytes=(\d+)?-(\d+)?$/);
-      if (!rangeMatch)
-      {
-        dumpn("*** Range header bogosity: '" + metadata.getHeader("Range") + "'");
-        throw HTTP_400;
-      }
-
-      if (rangeMatch[1] !== undefined)
-        start = parseInt(rangeMatch[1], 10);
-
-      if (rangeMatch[2] !== undefined)
-        end = parseInt(rangeMatch[2], 10);
-
-      if (start === undefined && end === undefined)
-      {
-        dumpn("*** More Range header bogosity: '" + metadata.getHeader("Range") + "'");
-        throw HTTP_400;
-      }
-
-      // No start given, so the end is really the count of bytes from the
-      // end of the file.
-      if (start === undefined)
-      {
-        start = Math.max(0, file.fileSize - end);
-        end   = file.fileSize - 1;
-      }
-
-      // start and end are inclusive
-      if (end === undefined || end >= file.fileSize)
-        end = file.fileSize - 1;
-
-      if (start !== undefined && start >= file.fileSize) {
-        var HTTP_416 = new HttpError(416, "Requested Range Not Satisfiable");
-        HTTP_416.customErrorHandling = function(errorResponse)
-        {
-          maybeAddHeaders(file, metadata, errorResponse);
-        };
-        throw HTTP_416;
-      }
-
-      if (end < start)
-      {
-        response.setStatusLine(metadata.httpVersion, 200, "OK");
-        start = 0;
-        end = file.fileSize - 1;
-      }
-      else
-      {
-        response.setStatusLine(metadata.httpVersion, 206, "Partial Content");
-        var contentRange = "bytes " + start + "-" + end + "/" + file.fileSize;
-        response.setHeader("Content-Range", contentRange);
-      }
-    }
-    else
-    {
-      start = 0;
-      end = file.fileSize - 1;
-    }
-
-    // finally...
-    dumpn("*** handling '" + path + "' as mapping to " + file.path + " from " +
-          start + " to " + end + " inclusive");
-    this._writeFileResponse(metadata, file, response, start, end - start + 1);
-  },
-
   /**
    * Writes an HTTP response for the given file, including setting headers for
    * file metadata.
@@ -2448,194 +1712,8 @@ ServerHandler.prototype =
    * @param count: uint
    *   the number of bytes to write
    */
-  _writeFileResponse: function(metadata, file, response, offset, count)
-  {
-    const PR_RDONLY = 0x01;
-
-    var type = this._getTypeFromFile(file);
-    if (type === SJS_TYPE)
-    {
-      var fis = new FileInputStream(file, PR_RDONLY, PERMS_READONLY,
-                                    Ci.nsIFileInputStream.CLOSE_ON_EOF);
-
-      try
-      {
-        var sis = new ScriptableInputStream(fis);
-        var s = Cu.Sandbox(gGlobalObject);
-        s.importFunction(dump, "dump");
-        s.importFunction(atob, "atob");
-        s.importFunction(btoa, "btoa");
-
-        // Define a basic key-value state-preservation API across requests, with
-        // keys initially corresponding to the empty string.
-        var self = this;
-        var path = metadata.path;
-        s.importFunction(function getState(k)
-        {
-          return self._getState(path, k);
-        });
-        s.importFunction(function setState(k, v)
-        {
-          self._setState(path, k, v);
-        });
-        s.importFunction(function getSharedState(k)
-        {
-          return self._getSharedState(k);
-        });
-        s.importFunction(function setSharedState(k, v)
-        {
-          self._setSharedState(k, v);
-        });
-        s.importFunction(function getObjectState(k, callback)
-        {
-          callback(self._getObjectState(k));
-        });
-        s.importFunction(function setObjectState(k, v)
-        {
-          self._setObjectState(k, v);
-        });
-        s.importFunction(function registerPathHandler(p, h)
-        {
-          self.registerPathHandler(p, h);
-        });
-
-        // Make it possible for sjs files to access their location
-        this._setState(path, "__LOCATION__", file.path);
-
-        try
-        {
-          // Alas, the line number in errors dumped to console when calling the
-          // request handler is simply an offset from where we load the SJS file.
-          // Work around this in a reasonably non-fragile way by dynamically
-          // getting the line number where we evaluate the SJS file.  Don't
-          // separate these two lines!
-          var line = new Error().lineNumber;
-          Cu.evalInSandbox(sis.read(file.fileSize), s, "latest");
-        }
-        catch (e)
-        {
-          dumpn("*** syntax error in SJS at " + file.path + ": " + e);
-          throw HTTP_500;
-        }
-
-        try
-        {
-          s.handleRequest(metadata, response);
-        }
-        catch (e)
-        {
-          dump("*** error running SJS at " + file.path + ": " +
-               e + " on line " +
-               (e instanceof Error
-               ? e.lineNumber + " in httpd.js"
-               : (e.lineNumber - line)) + "\n");
-          throw HTTP_500;
-        }
-      }
-      finally
-      {
-        fis.close();
-      }
-    }
-    else
-    {
-      try
-      {
-        response.setHeader("Last-Modified",
-                           toDateString(file.lastModifiedTime),
-                           false);
-      }
-      catch (e) { /* lastModifiedTime threw, ignore */ }
-
-      response.setHeader("Content-Type", type, false);
-      maybeAddHeaders(file, metadata, response);
-      response.setHeader("Content-Length", "" + count, false);
-
-      var fis = new FileInputStream(file, PR_RDONLY, PERMS_READONLY,
-                                    Ci.nsIFileInputStream.CLOSE_ON_EOF);
-
-      offset = offset || 0;
-      count  = count || file.fileSize;
-      NS_ASSERT(offset === 0 || offset < file.fileSize, "bad offset");
-      NS_ASSERT(count >= 0, "bad count");
-      NS_ASSERT(offset + count <= file.fileSize, "bad total data size");
-
-      try
-      {
-        if (offset !== 0)
-        {
-          // Seek (or read, if seeking isn't supported) to the correct offset so
-          // the data sent to the client matches the requested range.
-          if (fis instanceof Ci.nsISeekableStream)
-            fis.seek(Ci.nsISeekableStream.NS_SEEK_SET, offset);
-          else
-            new ScriptableInputStream(fis).read(offset);
-        }
-      }
-      catch (e)
-      {
-        fis.close();
-        throw e;
-      }
-
-      let writeMore = function () {
-        gThreadManager.currentThread
-                      .dispatch(writeData, Ci.nsIThread.DISPATCH_NORMAL);
-      }
-
-      var input = new BinaryInputStream(fis);
-      var output = new BinaryOutputStream(response.bodyOutputStream);
-      var writeData =
-        {
-          run: function()
-          {
-            var chunkSize = Math.min(65536, count);
-            count -= chunkSize;
-            NS_ASSERT(count >= 0, "underflow");
-
-            try
-            {
-              var data = input.readByteArray(chunkSize);
-              NS_ASSERT(data.length === chunkSize,
-                        "incorrect data returned?  got " + data.length +
-                        ", expected " + chunkSize);
-              output.writeByteArray(data, data.length);
-              if (count === 0)
-              {
-                fis.close();
-                response.finish();
-              }
-              else
-              {
-                writeMore();
-              }
-            }
-            catch (e)
-            {
-              try
-              {
-                fis.close();
-              }
-              finally
-              {
-                response.finish();
-              }
-              throw e;
-            }
-          }
-        };
-
-      writeMore();
-
-      // Now that we know copying will start, flag the response as async.
-      response.processAsync();
-    }
-  },
-
   _handleResponseFromChannel: function(request, response, channel) {
     let fis = channel.open();
-
-    dump (request.path.endsWith(".sjs"));
 
     if (request.path.endsWith(".sjs")) {
       try {
@@ -2661,6 +1739,11 @@ ServerHandler.prototype =
         s.importFunction(function setSharedState(key, value) {
           self._setSharedState(key, value);
         });
+
+        // Import function registered from external
+        for(let functionName in this._SJSFunctions) {
+          s.importFunction(this._SJSFunctions[functionName], functionName);
+        }
 
         try {
           // Alas, the line number in errors dumped to console when calling the
@@ -2885,14 +1968,6 @@ ServerHandler.prototype =
   {
     try
     {
-      var name = file.leafName;
-      var dot = name.lastIndexOf(".");
-      if (dot > 0)
-      {
-        var ext = name.slice(dot + 1);
-        if (ext in this._mimeMappings)
-          return this._mimeMappings[ext];
-      }
       return Cc["@mozilla.org/uriloader/external-helper-app-service;1"]
                .getService(Ci.nsIMIMEService)
                .getTypeFromFile(file);
@@ -2901,98 +1976,6 @@ ServerHandler.prototype =
     {
       return "application/octet-stream";
     }
-  },
-
-  /**
-   * Returns the nsILocalFile which corresponds to the path, as determined using
-   * all registered path->directory mappings and any paths which are explicitly
-   * overridden.
-   *
-   * @param path : string
-   *   the server path for which a file should be retrieved, e.g. "/foo/bar"
-   * @throws HttpError
-   *   when the correct action is the corresponding HTTP error (i.e., because no
-   *   mapping was found for a directory in path, the referenced file doesn't
-   *   exist, etc.)
-   * @returns nsILocalFile
-   *   the file to be sent as the response to a request for the path
-   */
-  _getFileForPath: function(path)
-  {
-    // decode and add underscores as necessary
-    try
-    {
-      path = toInternalPath(path, true);
-    }
-    catch (e)
-    {
-      dumpn("*** toInternalPath threw " + e);
-      throw HTTP_400; // malformed path
-    }
-
-    // next, get the directory which contains this path
-    var pathMap = this._pathDirectoryMap;
-
-    // An example progression of tmp for a path "/foo/bar/baz/" might be:
-    // "foo/bar/baz/", "foo/bar/baz", "foo/bar", "foo", ""
-    var tmp = path.substring(1);
-    while (true)
-    {
-      // do we have a match for current head of the path?
-      var file = pathMap.get(tmp);
-      if (file)
-      {
-        // XXX hack; basically disable showing mapping for /foo/bar/ when the
-        //     requested path was /foo/bar, because relative links on the page
-        //     will all be incorrect -- we really need the ability to easily
-        //     redirect here instead
-        if (tmp == path.substring(1) &&
-            tmp.length != 0 &&
-            tmp.charAt(tmp.length - 1) != "/")
-          file = null;
-        else
-          break;
-      }
-
-      // if we've finished trying all prefixes, exit
-      if (tmp == "")
-        break;
-
-      tmp = tmp.substring(0, tmp.lastIndexOf("/"));
-    }
-
-    // no mapping applies, so 404
-    if (!file)
-      throw HTTP_404;
-
-
-    // last, get the file for the path within the determined directory
-    var parentFolder = file.parent;
-    var dirIsRoot = (parentFolder == null);
-
-    // Strategy here is to append components individually, making sure we
-    // never move above the given directory; this allows paths such as
-    // "<file>/foo/../bar" but prevents paths such as "<file>/../base-sibling";
-    // this component-wise approach also means the code works even on platforms
-    // which don't use "/" as the directory separator, such as Windows
-    var leafPath = path.substring(tmp.length + 1);
-    var comps = leafPath.split("/");
-    for (var i = 0, sz = comps.length; i < sz; i++)
-    {
-      var comp = comps[i];
-
-      if (comp == "..")
-        file = file.parent;
-      else if (comp == "." || comp == "")
-        continue;
-      else
-        file.append(comp);
-
-      if (!dirIsRoot && file.equals(parentFolder))
-        throw HTTP_403;
-    }
-
-    return file;
   },
 
   /**
@@ -3050,10 +2033,7 @@ ServerHandler.prototype =
       // actually handle the error
       try
       {
-        if (errorCode in this._overrideErrors)
-          this._overrideErrors[errorCode](metadata, response);
-        else
-          this._defaultErrors[errorCode](metadata, response);
+        this._defaultErrors[errorCode](metadata, response);
       }
       catch (e)
       {
@@ -3070,9 +2050,7 @@ ServerHandler.prototype =
         dumpn("*** error in handling for error code " + errorCode + ", " +
               "falling back to " + errorX00 + "...");
         response = new Response(response._connection);
-        if (errorX00 in this._overrideErrors)
-          this._overrideErrors[errorX00](metadata, response);
-        else if (errorX00 in this._defaultErrors)
+        if (errorX00 in this._defaultErrors)
           this._defaultErrors[errorX00](metadata, response);
         else
           throw HTTP_500;
@@ -3093,10 +2071,7 @@ ServerHandler.prototype =
       try
       {
         response = new Response(response._connection);
-        if (500 in this._overrideErrors)
-          this._overrideErrors[500](metadata, response);
-        else
-          this._defaultErrors[500](metadata, response);
+        this._defaultErrors[500](metadata, response);
       }
       catch (e2)
       {
@@ -3117,15 +2092,6 @@ ServerHandler.prototype =
    */
   _defaultErrors:
   {
-    400: function(metadata, response)
-    {
-      // none of the data in metadata is reliable, so hard-code everything here
-      response.setStatusLine("1.1", 400, "Bad Request");
-      response.setHeader("Content-Type", "text/plain;charset=utf-8", false);
-
-      var body = "Bad request\n";
-      response.bodyOutputStream.write(body, body.length);
-    },
     403: function(metadata, response)
     {
       response.setStatusLine(metadata.httpVersion, 403, "Forbidden");
@@ -3157,25 +2123,6 @@ ServerHandler.prototype =
                   </html>";
       response.bodyOutputStream.write(body, body.length);
     },
-    416: function(metadata, response)
-    {
-      response.setStatusLine(metadata.httpVersion,
-                            416,
-                            "Requested Range Not Satisfiable");
-      response.setHeader("Content-Type", "text/html;charset=utf-8", false);
-
-      var body = "<html>\
-                   <head>\
-                    <title>416 Requested Range Not Satisfiable</title></head>\
-                    <body>\
-                     <h1>416 Requested Range Not Satisfiable</h1>\
-                     <p>The byte range was not valid for the\
-                        requested resource.\
-                     </p>\
-                    </body>\
-                  </html>";
-      response.bodyOutputStream.write(body, body.length);
-    },
     500: function(metadata, response)
     {
       response.setStatusLine(metadata.httpVersion,
@@ -3193,136 +2140,8 @@ ServerHandler.prototype =
                   </html>";
       response.bodyOutputStream.write(body, body.length);
     },
-    501: function(metadata, response)
-    {
-      response.setStatusLine(metadata.httpVersion, 501, "Not Implemented");
-      response.setHeader("Content-Type", "text/html;charset=utf-8", false);
-
-      var body = "<html>\
-                    <head><title>501 Not Implemented</title></head>\
-                    <body>\
-                      <h1>501 Not Implemented</h1>\
-                      <p>This server is not (yet) Apache.</p>\
-                    </body>\
-                  </html>";
-      response.bodyOutputStream.write(body, body.length);
-    },
-    505: function(metadata, response)
-    {
-      response.setStatusLine("1.1", 505, "HTTP Version Not Supported");
-      response.setHeader("Content-Type", "text/html;charset=utf-8", false);
-
-      var body = "<html>\
-                    <head><title>505 HTTP Version Not Supported</title></head>\
-                    <body>\
-                      <h1>505 HTTP Version Not Supported</h1>\
-                      <p>This server only supports HTTP/1.0 and HTTP/1.1\
-                        connections.</p>\
-                    </body>\
-                  </html>";
-      response.bodyOutputStream.write(body, body.length);
-    }
   },
-
-  /**
-   * Contains handlers for the default set of URIs contained in this server.
-   */
-  _defaultPaths:
-  {
-    "/": function(metadata, response)
-    {
-      response.setStatusLine(metadata.httpVersion, 200, "OK");
-      response.setHeader("Content-Type", "text/html;charset=utf-8", false);
-
-      var body = "<html>\
-                    <head><title>httpd.js</title></head>\
-                    <body>\
-                      <h1>httpd.js</h1>\
-                      <p>If you're seeing this page, httpd.js is up and\
-                        serving requests!  Now set a base path and serve some\
-                        files!</p>\
-                    </body>\
-                  </html>";
-
-      response.bodyOutputStream.write(body, body.length);
-    },
-
-    "/trace": function(metadata, response)
-    {
-      response.setStatusLine(metadata.httpVersion, 200, "OK");
-      response.setHeader("Content-Type", "text/plain;charset=utf-8", false);
-
-      var body = "Request-URI: " +
-                 metadata.scheme + "://" + metadata.host + ":" + metadata.port +
-                 metadata.path + "\n\n";
-      body += "Request (semantically equivalent, slightly reformatted):\n\n";
-      body += metadata.method + " " + metadata.path;
-
-      if (metadata.queryString)
-        body +=  "?" + metadata.queryString;
-
-      body += " HTTP/" + metadata.httpVersion + "\r\n";
-
-      var headEnum = metadata.headers;
-      while (headEnum.hasMoreElements())
-      {
-        var fieldName = headEnum.getNext()
-                                .QueryInterface(Ci.nsISupportsString)
-                                .data;
-        body += fieldName + ": " + metadata.getHeader(fieldName) + "\r\n";
-      }
-
-      response.bodyOutputStream.write(body, body.length);
-    }
-  }
 };
-
-
-/**
- * Maps absolute paths to files on the local file system (as nsILocalFiles).
- */
-function FileMap()
-{
-  /** Hash which will map paths to nsILocalFiles. */
-  this._map = {};
-}
-FileMap.prototype =
-{
-  // PUBLIC API
-
-  /**
-   * Maps key to a clone of the nsILocalFile value if value is non-null;
-   * otherwise, removes any extant mapping for key.
-   *
-   * @param key : string
-   *   string to which a clone of value is mapped
-   * @param value : nsILocalFile
-   *   the file to map to key, or null to remove a mapping
-   */
-  put: function(key, value)
-  {
-    if (value)
-      this._map[key] = value.clone();
-    else
-      delete this._map[key];
-  },
-
-  /**
-   * Returns a clone of the nsILocalFile mapped to key, or null if no such
-   * mapping exists.
-   *
-   * @param key : string
-   *   key to which the returned file maps
-   * @returns nsILocalFile
-   *   a clone of the mapped file, or null if no mapping exists
-   */
-  get: function(key)
-  {
-    var val = this._map[key];
-    return val ? val.clone() : null;
-  }
-};
-
 
 // Response CONSTANTS
 
@@ -3634,21 +2453,6 @@ Response.prototype =
     this._finished = true;
   },
 
-
-  // NSISUPPORTS
-
-  //
-  // see nsISupports.QueryInterface
-  //
-  QueryInterface: function(iid)
-  {
-    if (iid.equals(Ci.nsIHttpResponse) || iid.equals(Ci.nsISupports))
-      return this;
-
-    throw Cr.NS_ERROR_NO_INTERFACE;
-  },
-
-
   // POST-CONSTRUCTION API (not exposed externally)
 
   /**
@@ -3936,14 +2740,6 @@ Response.prototype =
             response._sendBody();
           }
         },
-
-        QueryInterface: function(aIID)
-        {
-          if (aIID.equals(Ci.nsIRequestObserver) || aIID.equals(Ci.nsISupports))
-            return this;
-
-          throw Cr.NS_ERROR_NO_INTERFACE;
-        }
       };
 
     var headerCopier = this._asyncCopier =
@@ -3999,14 +2795,6 @@ Response.prototype =
             response.end();
           }
         },
-
-        QueryInterface: function(aIID)
-        {
-          if (aIID.equals(Ci.nsIRequestObserver) || aIID.equals(Ci.nsISupports))
-            return this;
-
-          throw Cr.NS_ERROR_NO_INTERFACE;
-        }
       };
 
     dumpn("*** starting async copier of body data...");
@@ -4122,22 +2910,6 @@ function WriteThroughCopier(source, sink, observer, context)
 }
 WriteThroughCopier.prototype =
 {
-  /* nsISupports implementation */
-
-  QueryInterface: function(iid)
-  {
-    if (iid.equals(Ci.nsIInputStreamCallback) ||
-        iid.equals(Ci.nsIOutputStreamCallback) ||
-        iid.equals(Ci.nsIRequest) ||
-        iid.equals(Ci.nsISupports))
-    {
-      return this;
-    }
-
-    throw Cr.NS_ERROR_NO_INTERFACE;
-  },
-
-
   // NSIINPUTSTREAMCALLBACK
 
   /**
@@ -5114,21 +3886,6 @@ Request.prototype =
     this._ensurePropertyBag();
     return this._bag.getProperty(name);
   },
-
-
-  // NSISUPPORTS
-
-  //
-  // see nsISupports.QueryInterface
-  //
-  QueryInterface: function(iid)
-  {
-    if (iid.equals(Ci.nsIHttpRequest) || iid.equals(Ci.nsISupports))
-      return this;
-
-    throw Cr.NS_ERROR_NO_INTERFACE;
-  },
-
 
   // PRIVATE IMPLEMENTATION
 
