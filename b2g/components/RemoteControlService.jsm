@@ -257,7 +257,7 @@ this.RemoteControlService = {
 
     let lock = SettingsService.createLock();
 
-    this._httpServer.stop(function(){});
+    this._httpServer.stop();
     lock.set(RC_SETTINGS_SERVERIP, "", null);
 
     if (Ci.nsINetworkManager) {
