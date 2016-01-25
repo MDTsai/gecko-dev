@@ -550,8 +550,8 @@ nsHttpServer.prototype =
     // socket-close notification and pending request completion happen async
   },
 
-  registerPathCallback: function(callback) {
-    this._handler.registerPathCallback(callback);
+  registerPathToChannelHandler: function(handler) {
+    this._handler.registerPathToChannelHandler(handler);
   },
 
   registerSJSFunctions: function(functions) {
@@ -1604,7 +1604,7 @@ function ServerHandler(server)
   /** Entire-server state storage for nsISupports values. */
   this._objectState = {};
 
-  this._pathCallback = null;
+  this._pathToChannelHandler = null;
   this._SJSFunctions = null;
 }
 ServerHandler.prototype =
@@ -1632,7 +1632,7 @@ ServerHandler.prototype =
     {
       try
       {
-        this._handleResponseFromChannel(request, response, this._pathCallback(request));
+        this._handleResponseFromChannel(request, response, this._pathToChannelHandler(request));
       }
       catch (e)
       {
@@ -1688,8 +1688,8 @@ ServerHandler.prototype =
     response.complete();
   },
 
-  registerPathCallback: function(callback) {
-    this._pathCallback = callback;
+  registerPathToChannelHandler: function(handler) {
+    this._pathToChannelHandler = handler;
   },
 
   registerSJSFunctions: function(functions) {
@@ -1755,7 +1755,7 @@ ServerHandler.prototype =
           Cu.evalInSandbox(sis.read(fis.available()), s, "latest");
         } catch (e) {
           DEBUG && debug("*** syntax error in SJS at " + channel.URI.path + ": " + e);
-          throw HttpServer.HTTP_500;
+          throw HTTP_500;
         }
 
         try {
@@ -1766,7 +1766,7 @@ ServerHandler.prototype =
                (e instanceof Error
                 ? e.lineNumber + " in httpd.js"
                 : (e.lineNumber - line)) + "\n");
-          throw HttpServer.HTTP_500;
+          throw HTTP_500;
         }
       } finally {
         fis.close();

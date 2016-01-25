@@ -48,6 +48,12 @@ XPCOMUtils.defineLazyModuleGetter(this, "SystemAppProxy",
 XPCOMUtils.defineLazyModuleGetter(this, "HttpServer",
                           "resource://gre/modules/RemoteControlHttpd.jsm");
 
+XPCOMUtils.defineLazyModuleGetter(this, "HTTP_403",
+                          "resource://gre/modules/RemoteControlHttpd.jsm");
+
+XPCOMUtils.defineLazyModuleGetter(this, "HTTP_404",
+                          "resource://gre/modules/RemoteControlHttpd.jsm");
+
 XPCOMUtils.defineLazyServiceGetter(this, "UUIDGenerator",
                           "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
 
@@ -114,8 +120,8 @@ this.RemoteControlService = {
     // Listen pairing_required changes from Gecko preference
     Services.prefs.addObserver("remotecontrol.service.pairing_required", this, false);
 
-    // Register path to channel callback for Remote Control Service's logic
-    this._httpServer.registerPathCallback(this._pathCallback);
+    // Register path to channel handler for Remote Control Service's logic
+    this._httpServer.registerPathToChannelHandler(this._pathToChannelHandler);
 
     // Register internal functions export to SJS
     this._httpServer.registerSJSFunctions({
@@ -465,7 +471,11 @@ this.RemoteControlService = {
     }
     // Block any invalid access to file system
     if (path.indexOf("..") > -1) {
-      return false;
+      throw HTTP_403;
+    }
+    // Not allow to browse folder
+    if (path.endsWith("/")) {
+      throw HTTP_403;
     }
 
     // Using channel.open to check if static file exists
@@ -479,14 +489,14 @@ this.RemoteControlService = {
     return false;
   },
 
-  // For RemoteControlHTTPd receives a request, retrieve a channel from _pathCallback for response
-  _pathCallback: function(request) {
+  // For RemoteControlHTTPd receives a request with path, retrieve a channel for response
+  _pathToChannelHandler: function(request) {
     let self = RemoteControlService;
 
     if (self._static_request_blacklist.indexOf(request.path) >= 0) {
       // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
       // For other static files in Gaia, they change frequently. So we don't use whitelist here.
-      throw HttpServer.HTTP_500;
+      throw HTTP_403;
     } else if (self._sjs_request_whitelist.indexOf(request.path) >= 0) {
       // For server script, we only accept these files for dispatch event and pairing only, so use whitelist
       return Services.io.newChannel(self._server_script_prepath + request.path, null, null);
@@ -496,7 +506,7 @@ this.RemoteControlService = {
       let baseURI = Services.io.newURI(self._client_page_prepath, null, null);
       return Services.io.newChannel(path, null, baseURI);
     } else {
-      throw HttpServer.HTTP_500;
+      throw HTTP_404;
     }
   },
 
