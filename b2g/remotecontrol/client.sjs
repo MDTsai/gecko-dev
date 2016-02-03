@@ -53,7 +53,9 @@ function sendChromeEvent(action, details)
 
 function handleCustomEvent(event)
 {
-  sendChromeEvent(event.type, event.detail);
+  sendChromeEvent('custom-action', {
+    detail: event.detail
+  });
 }
 
 function getCursorPosition()
