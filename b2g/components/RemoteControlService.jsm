@@ -192,6 +192,11 @@ this.RemoteControlService = {
     this._secureTickets = new Map();
     this._pairingTickets = new Map();
     this._eventReplies = new Map();
+
+    debug(this._zeroFill(1, 4));
+    debug(this._zeroFill(12, 4));
+    debug(this._zeroFill(123, 4));
+    debug(this._zeroFill(1234, 4));
   },
 
   // PUBLIC API
@@ -534,9 +539,8 @@ this.RemoteControlService = {
 
   _zeroFill: function(number, width) {
     width -= number.toString().length;
-    if ( width > 0 )
-    {
-      return new Array( width + (/\./.test( number ) ? 2 : 1) ).join( '0' ) + number;
+    if (width > 0) {
+      return new Array(width+1).join('0') + number;
     }
     return number + ""; // always return a string
   },
