@@ -137,7 +137,7 @@ function range(x, y) {
 const HTTP_ERROR_CODES = array2obj(range(400, 417).concat(range(500, 505)));
 
 /** Type used to denote SJS scripts for CGI-like functionality. */
-const SJS_TYPE = "sjs";
+const SJS_TYPE = ".sjs";
 
 /** Base for relative timestamps produced by dumpn(). */
 var firstStamp = 0;
@@ -169,9 +169,11 @@ function dumpn(str) {
 
 /** Dumps the current JS stack if DEBUG. */
 function dumpStack() {
-  // peel off the frames for dumpStack() and Error()
-  let stack = new Error().stack.split(/\n/).slice(2);
-  stack.forEach(dumpn);
+  if (DEBUG) {
+    // peel off the frames for dumpStack() and Error()
+    let stack = new Error().stack.split(/\n/).slice(2);
+    stack.forEach(dumpn);
+  }
 }
 
 /**
@@ -441,7 +443,7 @@ nsHttpServer.prototype = {
   },
 
   /**
-   * Registers a path to channdl handler.
+   * Registers a path to channel handler.
    *
    * @param handler
    *   an object which will handle given path and return a channel
@@ -459,65 +461,6 @@ nsHttpServer.prototype = {
    */
   registerSJSFunctions: function(functions) {
     this._handler.registerSJSFunctions(functions);
-  },
-
-  /**
-   * Retrieves the string associated with the given key in this, for the given
-   * path's saved state.  All keys are initially associated with the empty
-   * string.
-   */
-  getState: function(path, key) {
-    return this._handler._getState(path, key);
-  },
-
-  /**
-   * Sets the string associated with the given key in this, for the given path's
-   * saved state.
-   */
-  setState: function(path, key, value) {
-    return this._handler._setState(path, key, value);
-  },
-
-  /**
-   * Retrieves the string associated with the given key in this, in
-   * entire-server saved state.  All keys are initially associated with the
-   * empty string.
-   */
-  getSharedState: function(key) {
-    return this._handler._getSharedState(key);
-  },
-
-  /**
-   * Sets the string associated with the given key in this, in entire-server
-   * saved state.
-   */
-  setSharedState: function(key, value) {
-    return this._handler._setSharedState(key, value);
-  },
-
-  /**
-   * Retrieves the object associated with the given key in this in
-   * object-valued saved state.  All keys are initially associated with null.
-   */
-  getObjectState: function(key) {
-    return this._handler._getObjectState(key);
-  },
-
-  /**
-   * Sets the object associated with the given key in this in object-valued
-   * saved state.  The value may be null.
-   */
-  setObjectState: function(key, value) {
-    return this._handler._setObjectState(key, value);
-  },
-
-  /**
-   * Returns true iff this server is not running (and is not in the process of
-   * serving any requests still to be processed when the server was last
-   * stopped after being run).
-   */
-  isStopped: function() {
-    return this._socketClosed && !this._hasOpenConnections();
   },
 
   // PRIVATE IMPLEMENTATION
@@ -618,11 +561,6 @@ nsHttpServer.prototype = {
               "connection number mismatch?  " +
               this._connections[connection.number]);
     delete this._connections[connection.number];
-
-    // Bug 508125: Add a GC here else we'll use gigabytes of memory running
-    // mochitests. We can't rely on xpcshell doing an automated GC, as that
-    // would interfere with testing GC stuff...
-    Cu.forceGC();
   },
 
   /**
@@ -1465,9 +1403,6 @@ function ServerHandler(server) {
   /** Entire-server state storage. */
   this._sharedState = {};
 
-  /** Entire-server state storage for nsISupports values. */
-  this._objectState = {};
-
   /** Custom handler for convert path to channel */
   this._pathToChannelHandler = null;
 
@@ -1775,46 +1710,6 @@ ServerHandler.prototype = {
       throw new Error("non-string value passed");
     }
     this._sharedState[key] = value;
-  },
-
-  /**
-   * Returns the object associated with the given key in the server for SJS
-   * state preservation across requests.
-   *
-   * @param key : string
-   *  the key whose corresponding object is to be returned
-   * @returns nsISupports
-   *  the corresponding object, or null if none was present
-   */
-  _getObjectState: function(key) {
-    if (typeof key !== "string") {
-      throw new Error("non-string key passed");
-    }
-    return this._objectState[key] || null;
-  },
-
-  /**
-   * Sets the object associated with the given key in the server for SJS
-   * state preservation across requests.
-   *
-   * @param key : string
-   *  the key whose corresponding object is to be set
-   * @param value : nsISupports
-   *  the object to be associated with the given key; may be null
-   */
-  _setObjectState: function(key, value) {
-    if (typeof key !== "string") {
-      throw new Error("non-string key passed");
-    }
-    if (typeof value !== "object") {
-      throw new Error("non-object value passed");
-    }
-    if (value && !("QueryInterface" in value)) {
-      throw new Error("must pass an nsISupports; use wrappedJSObject to ease " +
-                      "pain when using the server from JS");
-    }
-
-    this._objectState[key] = value;
   },
 
   /**
