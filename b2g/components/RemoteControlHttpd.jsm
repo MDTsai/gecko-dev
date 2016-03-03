@@ -376,6 +376,14 @@ nsHttpServer.prototype = {
     dumpn("*** starting connection " + connectionNumber);
   },
 
+  onHandshakeDone: function(socket, status) {
+    dumpn("*** onHandshakeDone(socket=" + socket + ", status=" + status + ")");
+    dump("Using TLS 1.2" + status.tlsVersionUsed);
+    dump("Using expected cipher" + status.cipherName);
+    dump("Using 128-bit key" + status.keyLength);
+    dump("Using 128-bit MAC" + status.macLength);
+  },
+
   /**
    * Called when the socket associated with this is closed.
    *
@@ -419,8 +427,8 @@ nsHttpServer.prototype = {
    *   called on this but before the provided callback function has been
    *   called.
    */
-  start: function(port) {
-    this._start(port, "0.0.0.0")
+  start: function(port, cert) {
+    this._start(port, "0.0.0.0", cert)
   },
 
   /**
@@ -464,7 +472,7 @@ nsHttpServer.prototype = {
   },
 
   // PRIVATE IMPLEMENTATION
-  _start: function(port, host) {
+  _start: function(port, host, cert) {
     if (this._socket) {
       throw Cr.NS_ERROR_ALREADY_INITIALIZED;
     }
@@ -497,9 +505,9 @@ nsHttpServer.prototype = {
                   .getService(Ci.nsIIOService);
       let socket;
       for (let i = 100; i; i--) {
-        let temp = new ServerSocket(this._port,
-                                    loopback, // true = localhost, false = everybody
-                                    maxConnections);
+        let temp = Cc["@mozilla.org/network/tls-server-socket;1"].createInstance(Ci.nsITLSServerSocket);
+        temp.init(this._port, loopback, maxConnections);
+        temp.serverCert = cert;
 
         let allowed = ios.allowPort(temp.port, "http");
         if (!allowed) {
@@ -523,6 +531,12 @@ nsHttpServer.prototype = {
 
       dumpn(">>> listening on port " + socket.port + ", " + maxConnections +
             " pending connections");
+
+      socket.serverCert = cert;
+      socket.setSessionCache(false);
+      socket.setSessionTickets(false);
+      socket.setRequestClientCertificate(Ci.nsITLSServerSocket.REQUEST_NEVER);
+
       socket.asyncListen(this);
       this._port = socket.port;
       this._socket = socket;

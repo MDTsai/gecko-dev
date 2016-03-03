@@ -60,6 +60,9 @@ XPCOMUtils.defineLazyServiceGetter(this, "UUIDGenerator",
 XPCOMUtils.defineLazyServiceGetter(this, "SettingsService",
                           "@mozilla.org/settingsService;1", "nsISettingsService");
 
+XPCOMUtils.defineLazyServiceGetter(this, "certService",
+                          "@mozilla.org/security/local-cert-service;1", "nsILocalCertService");
+
 // For bi-direction share with Gaia remote-control app, use mozSettings here, not Gecko preference
 // Ex. the service adds authorized devices, app can revoke all
 const RC_SETTINGS_DEVICES = "remote-control.authorized-devices";
@@ -341,7 +344,17 @@ this.RemoteControlService = {
     Services.obs.addObserver(this, "xpcom-shutdown", false);
 
     // Start httpServer anyway
-    this._httpServer.start(this._activeServerPort);
+    Cc["@mozilla.org/psm;1"].getService(Ci.nsISupports);
+    certService.getOrCreateCert("tls-test", {
+      handleCert: function(cert, result) {
+        if(result) {
+          aReject("getCert " + result);
+        } else {
+          let self = RemoteControlService;
+          self._httpServer.start(self._activeServerPort, cert);
+        }
+      }
+    });
     this._serverStatus = SERVER_STATUS.STARTED;
   },
 
