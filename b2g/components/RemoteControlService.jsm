@@ -27,7 +27,7 @@
 "use strict";
 
 /* static functions */
-const DEBUG = false;
+const DEBUG = true;
 const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
 
 function debug(aStr) {
@@ -351,11 +351,100 @@ this.RemoteControlService = {
           aReject("getCert " + result);
         } else {
           let self = RemoteControlService;
+          debug ("fingerprint = " + cert.sha256Fingerprint);
           self._httpServer.start(self._activeServerPort, cert);
         }
       }
     });
+    this._testjpake();
     this._serverStatus = SERVER_STATUS.STARTED;
+  },
+
+  _testjpake: function() {
+    let a = Cc["@mozilla.org/services-crypto/sync-jpake;1"]
+              .createInstance(Ci.nsISyncJPAKE);
+    let b = Cc["@mozilla.org/services-crypto/sync-jpake;1"]
+              .createInstance(Ci.nsISyncJPAKE);
+
+    let a_gx1 = {};
+    let a_gv1 = {};
+    let a_r1 = {};
+    let a_gx2 = {};
+    let a_gv2 = {};
+    let a_r2 = {};
+
+    let b_gx1 = {};
+    let b_gv1 = {};
+    let b_r1 = {};
+    let b_gx2 = {};
+    let b_gv2 = {};
+    let b_r2 = {};
+
+    a.round1("alice", a_gx1, a_gv1, a_r1, a_gx2, a_gv2, a_r2);
+    b.round1("bob", b_gx1, b_gv1, b_r1, b_gx2, b_gv2, b_r2);
+
+    let a_A = {};
+    let a_gva = {};
+    let a_ra = {};
+
+    let b_A = {};
+    let b_gva = {};
+    let b_ra = {};
+
+    a.round2("bob", "sekrit", b_gx1.value, b_gv1.value, b_r1.value,
+             b_gx2.value, b_gv2.value, b_r2.value, a_A, a_gva, a_ra);
+    b.round2("alice", "sekrit", a_gx1.value, a_gv1.value, a_r1.value,
+             a_gx2.value, a_gv2.value, a_r2.value, b_A, b_gva, b_ra);
+
+    let a_aes = {};
+    let a_hmac = {};
+    let b_aes = {};
+    let b_hmac = {};
+
+    a.final(b_A.value, b_gva.value, b_ra.value, "ohai", a_aes, a_hmac);
+    b.final(a_A.value, a_gva.value, a_ra.value, "ohai", b_aes, b_hmac);
+
+    //do_check_eq(a_aes.value, b_aes.value);
+    //do_check_eq(a_hmac.value, b_hmac.value);
+
+    try {
+      let crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
+      let subtle = crypto.subtle;
+      debug(a_aes.value);
+      var aes = this._base64ToArrayBuffer(a_aes.value);
+      debug(aes);
+      subtle.importKey(
+        "raw",
+        aes,
+        {
+          name: "AES-CBC",
+        },
+        true,
+        ["encrypt", "decrypt"]
+      ).then(function(key) {
+        debug("key is " + key);
+        debug(key.type);
+        debug(key.extractable);
+        for(let prop in key.algorithm) {
+          debug(prop + " " + key.algorithm[prop]);
+        }
+        debug(key.usages);
+      }).catch(function(err) {
+        debug("err is " + err);
+      });
+    } catch (e) { debug (e.message); }
+    
+    debug("test jpake done");
+  },
+
+  _base64ToArrayBuffer: function(base64) {
+    var binary_string = atob(base64);
+    var len = binary_string.length;
+    var bytes = new Uint8Array(len);
+    for (var i = 0; i < len; i++) {
+      bytes[i] = binary_string.charCodeAt(i);
+    }
+    return bytes.buffer;
   },
 
   _pause: function() {
