@@ -4,8 +4,8 @@
 
 /*
  * client.sjs is following of remote control service (bug 1197749).
- * While RemoteControlService receives AJAX request, it creates a sandbox and eval clients.sjs in the sandbox.
- * AJAX request will be redirected to handleRequest in client.sjs.
+ * While RemoteControlService receives an event, it creates a sandbox and eval clients.sjs in the sandbox.
+ * The event is redirected to handleEvent in client.sjs.
  *
  * While launch an app, TV system app will notify RemoteControlService current mode belongs to this app.
  * For example, browser is cursor mode, user can use virtual touchpad on client page to control app.
@@ -19,11 +19,7 @@
  * - input: send remote input to TV system app, TV system app acts as an InputMethod
  * - custom: dispatch to TV system app directly, like press PIN is not a keypress, need system app handle it
  *
- * After every event, client.sjs sends reply to client page in response if the connection is still valid if:
- * 1) No pairing required or 2) already paired UUID is not expired.
- * Client page should reload and do pairing again when receives "{ verified: false}"
- *
- * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control#Ajax_Protocol
+ * For more detail, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control
  */
 
 const Cc = Components.classes;
@@ -44,7 +40,7 @@ function debug(message)
 }
 
 // Send ChromeEvent, as custom event communicate with Gaia TV system app
-// Receved event format: { type: 'custom', action: <custom action name, string>, ... }
+// Receved event format: { type: 'command', action: 'custom', detail: { action: <custom action name, string>, ... } }
 function sendChromeEvent(action, details)
 {
   details.action = action;
@@ -53,20 +49,20 @@ function sendChromeEvent(action, details)
 
 function handleCustomEvent(event)
 {
-  sendChromeEvent(event.type, event.detail);
+  sendChromeEvent(event.action, event.detail);
 }
 
 function getCursorPosition()
 {
   // By default, cursor position is (0, 0)
-  var x = isNaN(parseInt(getState("x"))) ? 0 : parseInt(getState("x"));
-  var y = isNaN(parseInt(getState("y"))) ? 0 : parseInt(getState("y"));
+  var x = isNaN(parseInt(getSharedState("x"))) ? 0 : parseInt(getSharedState("x"));
+  var y = isNaN(parseInt(getSharedState("y"))) ? 0 : parseInt(getSharedState("y"));
 
   return {x, y};
 }
 
 // Synthesize click/dblclick event in cursor mode to current cursor position, or dispatch keyboard event
-// Format: { type: 'click', detail: { }}
+// Format: { type: 'command', action: 'click', detail: { }}
 function handleClickEvent(event)
 {
   var isCursorMode = (getSharedState("isCursorMode") == "true");
@@ -82,7 +78,7 @@ function handleClickEvent(event)
       utils.sendMouseEvent(mouseType, cursorPos["x"], cursorPos["y"], 0, 1, 0);
      });
 
-     if (event.type == "dblclick") {
+     if (event.action == "dblclick") {
        ["mousedown",  "mouseup"].forEach(function(mouseType) {
          utils.sendMouseEvent(mouseType, cursorPos["x"], cursorPos["y"], 0, 2, 0);
        });
@@ -94,9 +90,10 @@ function handleClickEvent(event)
 }
 
 // sendMouseEvent in cursor mode to move cursor position, or dispatch 4 arrow keys from swipe
-// Receved event format: { type: 'touchstart', detail: { width: <client panel width>, height: <client panel height>} }
-// { type: 'touchmove', detail: { dx: <dx to start point>, dy: <dy to start point>} }
-// { type: 'touchend', detail: { dx: <dx to start point>, dy: <dy to start point>}, swipe: <gesture of the touch, up/down/left/right> }
+// Receved event format:
+// { type: 'command', action: 'touchstart', detail: { width: <client panel width>, height: <client panel height>} }
+// { type: 'command', action: 'touchmove', detail: { dx: <dx to start point>, dy: <dy to start point>} }
+// { type: 'command', action: 'touchend', detail: { dx: <dx to start point>, dy: <dy to start point>}, swipe: <gesture of the touch, up/down/left/right> }
 function handleTouchEvent(event)
 {
   let type = 'navigator:browser';
@@ -111,17 +108,17 @@ function handleTouchEvent(event)
   var isCursorMode = (getSharedState("isCursorMode") == "true");
 
   // Each event is independent, when touchstart, we set startX/startY for following touchmove/touchend
-  switch (event.type) {
+  switch (event.action) {
     case "touchstart":
       startX = cursorPos["x"];
       startY = cursorPos["y"];
-      setState("startX", startX.toString());
-      setState("startY", startY.toString());
+      setSharedState("startX", startX.toString());
+      setSharedState("startY", startY.toString());
       break;
     case "touchmove":
     case "touchend":
-      startX = parseInt(getState("startX"));
-      startY = parseInt(getState("startY"));
+      startX = parseInt(getSharedState("startX"));
+      startY = parseInt(getSharedState("startY"));
       break;
     default:
       return;
@@ -133,8 +130,8 @@ function handleTouchEvent(event)
   x = Math.min(shell.innerWidth, Math.max(0, startX + detail.dx));
   y = Math.min(shell.innerHeight, Math.max(0, startY + detail.dy));
 
-  setState("x", x.toString());
-  setState("y", y.toString());
+  setSharedState("x", x.toString());
+  setSharedState("y", y.toString());
 
   if(isCursorMode) {
     utils.sendMouseEvent("mousemove", x, y, 0, 0, 0);
@@ -142,14 +139,14 @@ function handleTouchEvent(event)
     // Use SystemAppProxy send chrome event to control gaia mouse cursor
     sendChromeEvent('move-cursor', {
       // remove "touch" from original event, state might be "start", "move" and "end"
-      state: event.type.substring(5),
+      state: event.action.substring(5),
       x: x,
       y: y
     });
   }
   else {
     // Send 4 direction key when not in cursor mode
-    if (event.type == "touchend") {
+    if (event.action == "touchend") {
       switch (detail.swipe) {
         case "up":
         case "down":
@@ -163,9 +160,10 @@ function handleTouchEvent(event)
 }
 
 // sendWheelEvent in cursor mode to scroll pages, or dispatch page up/down KeyboardEvent
-// Receved event format: { type: 'scrollstart', detail: { width: <client panel width>, height: <client panel height>} }
-// { type: 'scrollmove', detail: { dx: <dx to start point>, dy: <dy to start point>} }
-// { type: 'scrollend', detail: { dx: <dx to start point>, dy: <dy to start point>}, swipe: <gesture of the touch> }
+// Receved event format:
+// { type: 'command', action: 'scrollstart', detail: { width: <client panel width>, height: <client panel height>} }
+// { type: 'command', action: 'scrollmove', detail: { dx: <dx to start point>, dy: <dy to start point>} }
+// { type: 'command', action: 'scrollend', detail: { dx: <dx to start point>, dy: <dy to start point>}, swipe: <gesture of the touch> }
 function handleWheelEvent(event)
 {
   var isCursorMode = (getSharedState("isCursorMode") == "true");
@@ -182,17 +180,17 @@ function handleWheelEvent(event)
 
     // dx/dy is from starting point, but aDeltaX/aDeltaY to sendWheelEvent is current delta value
     // So we use sx/sy to store previous dx/dy, use dx-sx to get aDeltaX, dy-sy to get aDeltaY
-    var sx = isNaN(parseInt(getState("sx"))) ? 0 : parseInt(getState("sy"));
-    var sy = isNaN(parseInt(getState("sy"))) ? 0 : parseInt(getState("sy"));
+    var sx = isNaN(parseInt(getSharedState("sx"))) ? 0 : parseInt(getSharedState("sy"));
+    var sy = isNaN(parseInt(getSharedState("sy"))) ? 0 : parseInt(getSharedState("sy"));
 
     utils.sendWheelEvent(x, y,
       detail.dx - sx, detail.dy - sy , 0, shell.WheelEvent.DOM_DELTA_LINE,
       0, detail.dx - sx, detail.dy - sy, 0);
 
-    setState("sx", detail.dx.toString());
-    setState("sy", detail.dy.toString());
+    setSharedState("sx", detail.dx.toString());
+    setSharedState("sy", detail.dy.toString());
   } else {
-    if (event.type == "scrollend") {
+    if (event.action == "scrollend") {
       // Send page up/down when not in cursor mode
       switch (detail.swipe) {
         case "up":
@@ -351,7 +349,7 @@ function guessKeyNameFromKeyCode(KeyboardEvent, aKeyCode) {
 }
 
 // Use TIP (TextInputProcessor) to synthesize KeyboardEvent. But for ContextMenu, transfer to a mouseevent
-// Receved event format: { type: 'keypress', detail: { <KeyEvent constant, string, sush as "DOM_VK_RETURN"> } }
+// Receved event format: { type: 'command', action: 'keypress', detail: { <KeyEvent constant, string, sush as "DOM_VK_RETURN"> } }
 function handleKeyboardEvent(keyCodeName)
 {
   let type = "navigator:browser";
@@ -415,7 +413,8 @@ function handleKeyboardEvent(keyCodeName)
 
 // Receive from client page and paste a string to focused input field, done by Gaia TV system app
 // Gaia TV system app bug: https://bugzilla.mozilla.org/show_bug.cgi?id=1203045
-// Received event format { type: 'input', detail: {
+// Received event format
+// { type: 'command', action: 'input', detail: {
 //     clear: <whether to clear the entire string in the current focused input field, boolean>,
 //     string: <new string to append, string>,
 //     keycode: <a specified key to be pressed after the string inputted, integer>  } }
@@ -423,7 +422,7 @@ function handleRemoteTextInput(detail)
 {
   DEBUG && debug('input: ' + JSON.stringify(detail));
 
-  if (getState("inputPending") == "true") {
+  if (getSharedState("inputPending") == "true") {
     DEBUG && debug("ERROR: Has a pending input request!");
     return;
   }
@@ -447,62 +446,47 @@ function handleRemoteTextInput(detail)
 
     mozIM.setActive(false);
     sendChromeEvent('grant-input', { value: false });
-    setState("inputPending", "");
+    setSharedState("inputPending", "");
   }
 
-  setState("inputPending", "true");
+  setSharedState("inputPending", "true");
   sendChromeEvent('grant-input', { value: true });
   mozIM.setActive(true);
   mozIM.addEventListener('inputcontextchange', icChangeHandler);
   icChangeTimeout = sysApp.setTimeout(icChangeHandler, 1000);
 }
 
-// Entry point when receive a HTTP request from user, RemoteControlService.jsm
-// queryString format: message={ type: <event type>, detail: { <event detail>} }
-function handleRequest(request, response)
+// Entry point when receive an event for control command from user, RemoteControlService.jsm
+// Event format: message={ type: "command", action: <action type>, detail: { <event detail>} }
+function handleEvent(event)
 {
-  var requestIsValid = (isPairingRequired() == false || hasValidUUIDInCookie(request));
-
-  // client.sjs handles the event only when the request is valid.
-  if (requestIsValid) {
-    var queryString = decodeURIComponent(request.queryString.replace(/\+/g, "%20"));
-
-    response.setHeader("Content-Type", "text/html", false);
-
-    // Split JSON header "message=" and parse event
-    var event = JSON.parse(queryString.substring(8));
-
-    switch (event.type) {
-      case "keypress":
-        handleKeyboardEvent(event.detail);
-        break;
-      case "touchstart":
-      case "touchmove":
-      case "touchend":
-        DEBUG && debug(JSON.stringify(event));
-        handleTouchEvent(event);
-        break;
-      case "scrollmove":
-      case "scrollend":
-        DEBUG && debug(JSON.stringify(event));
-        handleWheelEvent(event);
-        break;
-      case "click":
-      case "dblclick":
-        DEBUG && debug(JSON.stringify(event));
-        handleClickEvent(event);
-        break;
-      case "textinput":
-        handleRemoteTextInput(event.detail);
-        break;
-      case "custom":
-        handleCustomEvent(event);
-        break;
-    }
+  switch (event.action) {
+    case "keypress":
+      handleKeyboardEvent(event.detail);
+      break;
+    case "touchstart":
+    case "touchmove":
+    case "touchend":
+      DEBUG && debug(JSON.stringify(event));
+      handleTouchEvent(event);
+      break;
+    case "scrollmove":
+    case "scrollend":
+      DEBUG && debug(JSON.stringify(event));
+      handleWheelEvent(event);
+      break;
+    case "click":
+    case "dblclick":
+      DEBUG && debug(JSON.stringify(event));
+      handleClickEvent(event);
+      break;
+    case "textinput":
+      handleRemoteTextInput(event.detail);
+      break;
+    case "custom":
+      handleCustomEvent(event);
+      break;
   }
 
-  // Send { verified: true } if: 1) No pairing required or 2) already paired UUID is not expired.
-  // client should reload and get pairing.html to pairing again
-  reply.verified = requestIsValid;
-  response.write(JSON.stringify(reply));
+  return;
 }

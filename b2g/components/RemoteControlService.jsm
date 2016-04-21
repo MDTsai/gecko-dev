@@ -4,12 +4,11 @@
 
 /*
  * RemoteControlService.jsm is the entry point of remote control function.
- * The service initializes web server (RemoteControlHttpd.js), handle request from user,
- * pass to static file or server script (sjs), send response to user.
+ * The service initializes TLS socket server (RemoteControlTLSd.js)
  *
- *     sjs (gecko) <--   RemoteControlService  --> static file (gaia, app://remote-control-client.gaiamobile.org/)
+ *               RemoteControlService <-- Gecko Preference
  *
- *     user <-->  RemoteControlHTTPd.jsm           Settings DB <--> gaia remote-control app
+ *     user -->  RemoteControlEventServer.jsm --> sjs (gecko)
  *
  * All events from user are passed to server script (sjs), sjs runs in sandbox,
  * transfer JSON message and dispatch corresponding events to Gecko.
@@ -17,9 +16,7 @@
  * Here is related component location:
  * gecko/b2g/components/RemoteControlService.jsm
  * gecko/b2g/remotecontrol/*.sjs
- * gecko/b2g/components/RemoteControlHttpd.js
- * gaia/tv_apps/remote-control - remote control app
- * gaia/tv_apps/remote-control-client - remote control client page static files
+ * gecko/b2g/components/RemoteControlEventServer.jsm
  *
  * For more details, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control
  */
@@ -45,14 +42,8 @@ Cu.import("resource://gre/modules/debug.js");
 XPCOMUtils.defineLazyModuleGetter(this, "SystemAppProxy",
                           "resource://gre/modules/SystemAppProxy.jsm");
 
-XPCOMUtils.defineLazyModuleGetter(this, "HttpServer",
-                          "resource://gre/modules/RemoteControlHttpd.jsm");
-
-XPCOMUtils.defineLazyModuleGetter(this, "HTTP_403",
-                          "resource://gre/modules/RemoteControlHttpd.jsm");
-
-XPCOMUtils.defineLazyModuleGetter(this, "HTTP_404",
-                          "resource://gre/modules/RemoteControlHttpd.jsm");
+XPCOMUtils.defineLazyModuleGetter(this, "EventServer",
+                          "resource://gre/modules/RemoteControlEventServer.jsm");
 
 XPCOMUtils.defineLazyServiceGetter(this, "UUIDGenerator",
                           "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
@@ -66,7 +57,6 @@ XPCOMUtils.defineLazyServiceGetter(this, "certService",
 // For bi-direction share with Gaia remote-control app, use mozSettings here, not Gecko preference
 // Ex. the service adds authorized devices, app can revoke all
 const RC_SETTINGS_DEVICES = "remote-control.authorized-devices";
-const RC_SETTINGS_SERVERIP = "remote-control.server-ip";
 
 const SERVER_STATUS = {
   STOPPED: 0,
@@ -74,55 +64,31 @@ const SERVER_STATUS = {
 };
 
 this.RemoteControlService = {
-  _httpServer: null,
+  _eventServer: null,
   _serverStatus: SERVER_STATUS.STOPPED,
-  _activeServerAddress: null,
-  _activeServerPort: null,
   _uuids: null, // record devices uuid : expire_timestamp pair
-  _client_page_prepath: null,
-  _static_request_blacklist: null,
-  _server_script_prepath: null,
-  _sjs_request_whitelist: null,
   _default_port: null,
   _UUID_expire_days: null,
   _pin: null,
-  _uuids: null, // record devices uuid : expire_timestamp pair
-  _pairingRequired: false,
 
   init: function() {
     DEBUG && debug("init");
 
-    this._httpServer = new HttpServer();
+    this._eventServer = new EventServer();
     this._uuids = {};
 
     // Initial member variables from Gecko preferences
-    this._client_page_prepath = Services.prefs.getCharPref("remotecontrol.client_page.prepath");
-    this._static_request_blacklist = Services.prefs.getCharPref("remotecontrol.client_page.blacklist").split(",");
-    this._server_script_prepath = Services.prefs.getCharPref("remotecontrol.server_script.prepath");
-    this._sjs_request_whitelist = Services.prefs.getCharPref("remotecontrol.server_script.whitelist").split(",");
-    this._activeServerPort = this._default_port = Services.prefs.getIntPref("remotecontrol.default_server_port");
+    this._default_port = Services.prefs.getIntPref("remotecontrol.default_server_port");
     this._UUID_expire_days = Services.prefs.getIntPref("remotecontrol.UUID_expire_days");
-    this._pairingRequired = Services.prefs.getBoolPref("remotecontrol.service.pairing_required");
-
-    // Listen UUID changes from gaia
-    Services.obs.addObserver (this, "mozsettings-changed", false);
 
     // Listen control mode change from gaia
     SystemAppProxy.addEventListener("mozContentEvent", this);
 
-    // Listen pairing_required changes from Gecko preference
-    Services.prefs.addObserver("remotecontrol.service.pairing_required", this, false);
-
-    // Register path to channel handler for Remote Control Service's path transfer logic
-    this._httpServer.registerPathToChannelHandler(this._pathToChannelHandler);
-
     // Register internal functions export to SJS
-    this._httpServer.registerSJSFunctions({
+    this._eventServer.registerSJSFunctions({
       "getPIN": this._getPIN,
       "clearPIN": this._clearPIN,
       "generateUUID": this._generateUUID,
-      "isPairingRequired": this._isPairingRequired,
-      "hasValidUUIDInCookie": this._hasValidUUIDInCookie,
     });
 
     // Get stored UUIDs from SettingsDB
@@ -168,15 +134,8 @@ this.RemoteControlService = {
       return false;
     }
 
-    let lock = SettingsService.createLock();
+    this._eventServer.stop();
 
-    this._httpServer.stop();
-    lock.set(RC_SETTINGS_SERVERIP, "", null);
-
-    if (Ci.nsINetworkManager) {
-      Services.obs.removeObserver(this, "network-active-changed");
-      Services.obs.removeObserver(this, "network:offline-status-changed");
-    }
     Services.obs.removeObserver(this, "xpcom-shutdown");
 
     this._serverStatus = SERVER_STATUS.STOPPED;
@@ -187,54 +146,9 @@ this.RemoteControlService = {
   // nsIObserver
   observe: function(subject, topic, data) {
     switch (topic) {
-      case "network-active-changed": {
-        if (!subject) {
-          // Pause service when there is no active network
-          this._pause();
-          break;
-        }
-
-        // Resume service when active network change with new IP address
-        // Other case will be handled by "network:offline-status-changed"
-        if (!Services.io.offline) {
-          this._resume();
-        }
-
-        break;
-      }
-      case "network:offline-status-changed": {
-        if (data == "offline") {
-          // Pause service when network status change to offline
-          this._pause();
-        } else {
-          // Resume service when network status change to online
-          this._resume();
-        }
-
-        break;
-      }
       case "xpcom-shutdown": {
         // Stop service when xpcom-shutdown
         this.stop();
-        break;
-      }
-      case "mozsettings-changed": {
-        // Receive UUID changes from gaia revoke all pairing, store to internal cache
-        if ("wrappedJSObject" in subject) {
-          subject = subject.wrappedJSObject;
-        }
-
-        if (subject["key"] == RC_SETTINGS_DEVICES) {
-          this._uuids = subject.value;
-        }
-
-        break;
-      }
-      case "nsPref:changed": {
-        // Monitor pairing_required change
-        if (data == "remotecontrol.service.pairing_required") {
-          this._pairingRequired = Services.prefs.getBoolPref(data);
-        }
         break;
       }
     }
@@ -256,7 +170,7 @@ this.RemoteControlService = {
         // Currently, we use mozContentEvent to receive control mode of current app from System App
         // Server script use "isCursorMode" to determine what kind event should dispatch to app
         // Bug 1224118 is a follow-up bug to implement a non-mozContentEvent way to receive control mode change
-        this._httpServer.setSharedState("isCursorMode", detail.detail.cursor.toString());
+        this._eventServer.setSharedState("isCursorMode", detail.detail.cursor.toString());
         break;
       case "remote-control-pin-dismissed":
         // System App dismiss PIN code in notification on screen when
@@ -269,81 +183,13 @@ this.RemoteControlService = {
   },
 
   // PRIVATE API
-  _doStart: function(aResolve, aReject, ipaddr, port) {
+  _doStart: function(aResolve, aReject, port) {
     DEBUG && debug("start");
-    this._activeServerAddress = null;
-    this._activeServerPort = port ? port : this._default_port;
-
-    if (ipaddr) {
-      // Use given ipaddr
-      this._activeServerAddress = ipaddr;
-    } else {
-      // nsINetworkManager is only available for b2g, based on Gonk, bug 1224094 is a follow-up bug for Stringray TV
-      if (Ci.nsINetworkManager) {
-        let nm = Cc["@mozilla.org/network/manager;1"].getService(Ci.nsINetworkManager);
-
-        // in b2g, if connected, use activeNetworkInfo
-        if (nm.activeNetworkInfo) {
-          let ipAddresses = {};
-          let prefixes = {};
-          let numOfIpAddresses = nm.activeNetworkInfo.getAddresses(ipAddresses, prefixes);
-
-          this._activeServerAddress = ipAddresses.value;
-        }
-
-        // Monitor network status to pause/restart service
-        Services.obs.addObserver(this, "network-active-changed", false);
-        Services.obs.addObserver(this, "network:offline-status-changed", false);
-      } else {
-        // In b2g-desktop, use dns reverse lookup local ip address. Modify /etc/hosts if necessary
-        let dns = Cc["@mozilla.org/network/dns-service;1"]
-                       .getService(Ci.nsIDNSService);
-        let activeServerAddressDNSListener = {
-          onLookupComplete: function(aRequest, aRecord, aStatus) {
-            if (aRecord) {
-              let self = RemoteControlService;
-              let lock = SettingsService.createLock();
-              let settingsCallback = {
-                handle: function(name, result) {
-                  aResolve();
-                },
-                handleError: function(name) {
-                  aReject("SettingsFailure");
-                },
-              };
-
-              self._activeServerAddress = aRecord.getNextAddrAsString();
-              lock.set(RC_SETTINGS_SERVERIP, self._activeServerAddress + ":" + self._activeServerPort, settingsCallback);
-            } else {
-              aReject("DNSLookupFailure");
-            }
-          }
-        };
-        dns.asyncResolve(dns.myHostName, 0, activeServerAddressDNSListener, Services.tm.mainThread);
-      }
-    }
-
-    if (this._activeServerAddress !== null) {
-      let lock = SettingsService.createLock();
-      let settingsCallback = {
-        handle: function(name, result) {
-          aResolve();
-        },
-        handleError: function(name) {
-          aReject("SettingsFailure");
-        },
-      };
-
-      lock.set(RC_SETTINGS_SERVERIP, this._activeServerAddress + ":" + this._activeServerPort, settingsCallback);
-    } else if (Ci.nsINetworkManager){
-      // For b2g but there no IP address, reject promise
-      aReject("NoIpAddress");
-    }
 
     // Monitor xpcom-shutdown to stop service and clean up
     Services.obs.addObserver(this, "xpcom-shutdown", false);
 
-    // Start httpServer anyway
+    // Start eventServer with self-signed certification
     Cc["@mozilla.org/psm;1"].getService(Ci.nsISupports);
     certService.getOrCreateCert("tls-test", {
       handleCert: function(cert, result) {
@@ -351,90 +197,13 @@ this.RemoteControlService = {
           aReject("getCert " + result);
         } else {
           let self = RemoteControlService;
-          debug ("fingerprint = " + cert.sha256Fingerprint);
-          self._httpServer.start(self._activeServerPort, cert);
+          self._eventServer.start(self._default_port, cert);
+          aResolve();
+          this._serverStatus = SERVER_STATUS.STARTED;
         }
       }
     });
-    this._testjpake();
-    this._serverStatus = SERVER_STATUS.STARTED;
-  },
-
-  _testjpake: function() {
-    let a = Cc["@mozilla.org/services-crypto/sync-jpake;1"]
-              .createInstance(Ci.nsISyncJPAKE);
-    let b = Cc["@mozilla.org/services-crypto/sync-jpake;1"]
-              .createInstance(Ci.nsISyncJPAKE);
-
-    let a_gx1 = {};
-    let a_gv1 = {};
-    let a_r1 = {};
-    let a_gx2 = {};
-    let a_gv2 = {};
-    let a_r2 = {};
-
-    let b_gx1 = {};
-    let b_gv1 = {};
-    let b_r1 = {};
-    let b_gx2 = {};
-    let b_gv2 = {};
-    let b_r2 = {};
-
-    a.round1("alice", a_gx1, a_gv1, a_r1, a_gx2, a_gv2, a_r2);
-    b.round1("bob", b_gx1, b_gv1, b_r1, b_gx2, b_gv2, b_r2);
-
-    let a_A = {};
-    let a_gva = {};
-    let a_ra = {};
-
-    let b_A = {};
-    let b_gva = {};
-    let b_ra = {};
-
-    a.round2("bob", "sekrit", b_gx1.value, b_gv1.value, b_r1.value,
-             b_gx2.value, b_gv2.value, b_r2.value, a_A, a_gva, a_ra);
-    b.round2("alice", "sekrit", a_gx1.value, a_gv1.value, a_r1.value,
-             a_gx2.value, a_gv2.value, a_r2.value, b_A, b_gva, b_ra);
-
-    let a_aes = {};
-    let a_hmac = {};
-    let b_aes = {};
-    let b_hmac = {};
-
-    a.final(b_A.value, b_gva.value, b_ra.value, "ohai", a_aes, a_hmac);
-    b.final(a_A.value, a_gva.value, a_ra.value, "ohai", b_aes, b_hmac);
-
-    //do_check_eq(a_aes.value, b_aes.value);
-    //do_check_eq(a_hmac.value, b_hmac.value);
-
-    try {
-      let crypto = Services.wm.getMostRecentWindow("navigator:browser").crypto;
-      let subtle = crypto.subtle;
-      debug(a_aes.value);
-      var aes = this._base64ToArrayBuffer(a_aes.value);
-      debug(aes);
-      subtle.importKey(
-        "raw",
-        aes,
-        {
-          name: "AES-CBC",
-        },
-        true,
-        ["encrypt", "decrypt"]
-      ).then(function(key) {
-        debug("key is " + key);
-        debug(key.type);
-        debug(key.extractable);
-        for(let prop in key.algorithm) {
-          debug(prop + " " + key.algorithm[prop]);
-        }
-        debug(key.usages);
-      }).catch(function(err) {
-        debug("err is " + err);
-      });
-    } catch (e) { debug (e.message); }
     
-    debug("test jpake done");
   },
 
   _base64ToArrayBuffer: function(base64) {
@@ -445,32 +214,6 @@ this.RemoteControlService = {
       bytes[i] = binary_string.charCodeAt(i);
     }
     return bytes.buffer;
-  },
-
-  _pause: function() {
-    // While network disconnected, remove registered active IP address
-    let lock = SettingsService.createLock();
-
-    lock.set(RC_SETTINGS_SERVERIP, "", null);
-  },
-
-  _resume: function() {
-    // While network connected, register to accept connections from active IP address
-    if (!Ci.nsINetworkManager) {
-      return;
-    }
-    let nm = Cc["@mozilla.org/network/manager;1"].getService(Ci.nsINetworkManager);
-
-    // in b2g, if connected, use activeNetworkInfo
-    if (nm.activeNetworkInfo) {
-      let ipAddresses = {};
-      let prefixes = {};
-      let numOfIpAddresses = nm.activeNetworkInfo.getAddresses(ipAddresses, prefixes);
-      let lock = SettingsService.createLock();
-
-      this._activeServerAddress = ipAddresses.value;
-      lock.set(RC_SETTINGS_SERVERIP, this._activeServerAddress + ":" + this._activeServerPort, null);
-    }
   },
 
   // Generate UUID and expire timestamp
@@ -501,33 +244,6 @@ this.RemoteControlService = {
     return (uuid in RemoteControlService._uuids);
   },
 
-  _updateUUID: function(uuid, timestamp) {
-    if (this._isValidUUID(uuid)) {
-      this._uuids[uuid] = timestamp;
-    }
-  },
-
-  _clearUUID: function(uuid) {
-    if (uuid in this._uuids) {
-      let lock = SettingsService.createLock();
-
-      delete this._uuids[uuid];
-      lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
-    }
-  },
-
-  _clearAllUUID: function() {
-    let lock = SettingsService.createLock();
-
-    this._uuids = {};
-    lock.set(RC_SETTINGS_DEVICES, this._uuids, null);
-  },
-
-  // Export to SJS for evaluating client's request is valid
-  _isPairingRequired: function() {
-    return RemoteControlService._pairingRequired;
-  },
-
   _zeroFill: function(number, width) {
     width -= number.toString().length;
     if ( width > 0 )
@@ -540,6 +256,8 @@ this.RemoteControlService = {
   // Generate PIN code for pairing, format is 4 digits
   _generatePIN: function() {
     this._pin = this._zeroFill (Math.floor(Math.random() * 10000), 4);
+    // Show notification on screen
+    SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { pincode: this._pin, action: 'pin-created' });
     return this._pin;
   },
 
@@ -551,99 +269,6 @@ this.RemoteControlService = {
   // Export to SJS for cleaning current PIN code
   _clearPIN: function() {
     RemoteControlService._pin = null;
-  },
-
-  // Check incoming path is valid or not
-  _isValidPath: function(path) {
-    // '/' is always valid, will redirect to client.html or pairing.html
-    if (path == "/") {
-      return true;
-    }
-    // Block any invalid access to file system
-    if (path.indexOf("..") > -1) {
-      throw HTTP_403;
-    }
-    // Not allow to browse folder
-    if (path.endsWith("/")) {
-      throw HTTP_403;
-    }
-
-    // Using channel.open to check if static file exists
-    try {
-      let baseURI = Services.io.newURI(this._client_page_prepath, null, null);
-      let channel = Services.io.newChannel(path, null, baseURI);
-      let fis = channel.open();
-      fis.close();
-      return true;
-    } catch (e) {}
-    return false;
-  },
-
-  // For RemoteControlHTTPd receives a request with path, retrieve a channel for response
-  _pathToChannelHandler: function(request) {
-    let self = RemoteControlService;
-
-    if (self._static_request_blacklist.indexOf(request.path) >= 0) {
-      // We use blacklist to constrain user connect to "/", not skip pairing.html to client.html directly
-      // For other static files in Gaia, they change frequently. So we don't use whitelist here.
-      throw HTTP_403;
-    } else if (self._sjs_request_whitelist.indexOf(request.path) >= 0) {
-      // For server script, we only accept these files for dispatch event and pairing only, so use whitelist
-      return Services.io.newChannel(self._server_script_prepath + request.path, null, null);
-    } else if (self._isValidPath(request.path)) {
-      // Handle static files request
-      let path = self._transferRequestToPath(request);
-      let baseURI = Services.io.newURI(self._client_page_prepath, null, null);
-      return Services.io.newChannel(path, null, baseURI);
-    } else {
-      throw HTTP_404;
-    }
-  },
-
-  // Export to SJS for evaluating client's request contains valid UUID
-  _hasValidUUIDInCookie: function(request) {
-    // Return false if there is no cookie in header
-    if (!request.hasHeader("Cookie")) {
-      return false;
-    }
-
-    // Split cookie from header
-    // If cookie name is "uuid" and value is a valid UUID stored, return true
-    var cookies = request.getHeader("Cookie").split(";");
-    for (let i = 0; i < cookies.length; i++) {
-      let cookie = decodeURIComponent(cookies[i]);
-      let cookieName = cookie.substr(0, cookie.indexOf("="));
-      let cookieValue = cookie.substr(cookie.indexOf("=") + 1);
-
-      cookieName = cookieName.replace(/^\s+|\s+$/g, "");
-      if (cookieName == "uuid" && RemoteControlService._isValidUUID(cookieValue)) {
-        return true;
-      }
-    }
-
-    return false;
-  },
-
-  _transferRequestToPath: function(request) {
-    if (request.path == "/") {
-      // If it's not need to pairing or there is cookie with valid UUID
-      // Send client.html to the user directly to use RemoteControl
-      // Else, ensure there is a valid PIN code, notify System App to show the new PIN code
-      // Send pairing.html to start pairing
-      if (this._pairingRequired == false || this._hasValidUUIDInCookie(request)) {
-        return "/client.html";
-      } else {
-        var pin = this._getPIN();
-        if (pin === null) {
-          pin = this._generatePIN();
-          // Show notification on screen
-          SystemAppProxy._sendCustomEvent(REMOTE_CONTROL_EVENT, { pincode: pin, action: 'pin-created' });
-        }
-        return "/pairing.html";
-      }
-    } else {
-      return request.path;
-    }
   },
 };
 
