@@ -33,7 +33,7 @@ function debug(aStr) {
 
 this.EXPORTED_SYMBOLS = ["RemoteControlService"];
 
-const { classes: Cc, interfaces: Ci, utils: Cu, Constructor: CC } = Components;
+const { classes: Cc, interfaces: Ci, results: Cr, utils: Cu, Constructor: CC } = Components;
 
 Cu.import("resource://gre/modules/Services.jsm");
 Cu.import("resource://gre/modules/XPCOMUtils.jsm");
@@ -42,8 +42,8 @@ Cu.import("resource://gre/modules/debug.js");
 XPCOMUtils.defineLazyModuleGetter(this, "SystemAppProxy",
                           "resource://gre/modules/SystemAppProxy.jsm");
 
-XPCOMUtils.defineLazyModuleGetter(this, "EventServer",
-                          "resource://gre/modules/RemoteControlEventServer.jsm");
+//XPCOMUtils.defineLazyModuleGetter(this, "EventServer",
+//                          "resource://gre/modules/RemoteControlEventServer.jsm");
 
 XPCOMUtils.defineLazyServiceGetter(this, "UUIDGenerator",
                           "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
@@ -53,6 +53,16 @@ XPCOMUtils.defineLazyServiceGetter(this, "SettingsService",
 
 XPCOMUtils.defineLazyServiceGetter(this, "certService",
                           "@mozilla.org/security/local-cert-service;1", "nsILocalCertService");
+
+const ScriptableInputStream = CC("@mozilla.org/scriptableinputstream;1",
+                                 "nsIScriptableInputStream",
+                                 "init");
+const BinaryInputStream = CC("@mozilla.org/binaryinputstream;1",
+                             "nsIBinaryInputStream",
+                             "setInputStream");
+const BinaryOutputStream = CC("@mozilla.org/binaryoutputstream;1",
+                              "nsIBinaryOutputStream",
+                              "setOutputStream");
 
 // For bi-direction share with Gaia remote-control app, use mozSettings here, not Gecko preference
 // Ex. the service adds authorized devices, app can revoke all
@@ -64,17 +74,26 @@ const SERVER_STATUS = {
 };
 
 this.RemoteControlService = {
-  _eventServer: null,
+  //_eventServer: null,
   _serverStatus: SERVER_STATUS.STOPPED,
   _uuids: null, // record devices uuid : expire_timestamp pair
   _default_port: null,
   _UUID_expire_days: null,
   _pin: null,
 
+  // For TLS socket service
+  _port: undefined, // The port on which this service listens
+  _socket: null, // The socket associated with this
+  _doQuit: false, // Indicates when the service is to be shut down at the end of the request.
+  _socketClosed: true, // True if the socket in this is closed, false otherwise.
+  _connectionGen: 0, // Used for tracking existing connections
+  _connections: {}, // Hash of all open connections, indexed by connection number
+  _sharedState: {}, // erver state storage
+
   init: function() {
     DEBUG && debug("init");
 
-    this._eventServer = new EventServer();
+    //this._eventServer = new EventServer();
     this._uuids = {};
 
     // Initial member variables from Gecko preferences
@@ -85,11 +104,12 @@ this.RemoteControlService = {
     SystemAppProxy.addEventListener("mozContentEvent", this);
 
     // Register internal functions export to SJS
-    this._eventServer.registerSJSFunctions({
+    //this._eventServer.registerSJSFunctions(
+    this._SJSFunction = {
       "getPIN": this._getPIN,
       "clearPIN": this._clearPIN,
       "generateUUID": this._generateUUID,
-    });
+    };//);
 
     // Get stored UUIDs from SettingsDB
     let settingsCallback = {
@@ -134,15 +154,23 @@ this.RemoteControlService = {
       return false;
     }
 
-    this._eventServer.stop();
+    if (!this._socket) {
+      throw Cr.NS_ERROR_UNEXPECTED;
+    }
+
+    debug(">>> stopping listening on port " + this._socket.port);
 
     Services.obs.removeObserver(this, "xpcom-shutdown");
 
+    this._socket.close();
+    this._socket = null;
+    this._doQuit = false;
     this._serverStatus = SERVER_STATUS.STOPPED;
 
     return true;
   },
 
+  // Listeners
   // nsIObserver
   observe: function(subject, topic, data) {
     switch (topic) {
@@ -182,14 +210,82 @@ this.RemoteControlService = {
     }
   },
 
+  // NSISERVERSOCKETLISTENER
+  /**
+   * Processes an incoming request coming in on the given socket and contained
+   * in the given transport.
+   */
+  onSocketAccepted: function(socket, trans) {
+    debug("*** onSocketAccepted(socket=" + socket + ", trans=" + trans + ")");
+    debug(">>> new connection on " + trans.host + ":" + trans.port);
+
+    const SEGMENT_SIZE = 8192;
+    const SEGMENT_COUNT = 1024;
+    try {
+      var input = trans.openInputStream(0, SEGMENT_SIZE, SEGMENT_COUNT)
+                       .QueryInterface(Ci.nsIAsyncInputStream);
+      var output = trans.openOutputStream(0, 0, 0);
+    } catch (e) {
+      debug("*** error opening transport streams: " + e);
+      trans.close(Cr.NS_BINDING_ABORTED);
+      return;
+    }
+
+    var connectionNumber = ++this._connectionGen;
+
+    try {
+      var conn = new Connection(input, output, this, socket.port, trans.port,
+                                connectionNumber);
+      var reader = new CommandHandler(conn);
+
+      input.asyncWait(reader, 0, 0, Services.tm.mainThread);
+    } catch (e) {
+      debug("*** error in initial request-processing stages: " + e);
+      trans.close(Cr.NS_BINDING_ABORTED);
+      return;
+    }
+
+    this._connections[connectionNumber] = conn;
+    debug("*** starting connection " + connectionNumber);
+  },
+
+  onHandshakeDone: function(socket, status) {
+    debug("*** onHandshakeDone(socket=" + socket + ", status=" + status + ")");
+    debug("Using TLS 1.2" + status.tlsVersionUsed);
+    debug("Using expected cipher" + status.cipherName);
+    debug("Using 128-bit key" + status.keyLength);
+    debug("Using 128-bit MAC" + status.macLength);
+  },
+
+  /**
+   * Called when the socket associated with this is closed.
+   */
+  onStopListening: function(socket, status) {
+    debug(">>> shutting down server on port " + socket.port);
+    for (var n in this._connections) {
+      this._connections[n].close();
+    }
+    this._socketClosed = true;
+    if (this._hasOpenConnections()) {
+      debug("*** open connections!!!");
+    }
+  },
+
   // PRIVATE API
   _doStart: function(aResolve, aReject, port) {
     DEBUG && debug("start");
 
+    if (this._socket) {
+      throw Cr.NS_ERROR_ALREADY_INITIALIZED;
+    }
+
+    this._port = port;
+    this._doQuit = this._socketClosed = false;
+
     // Monitor xpcom-shutdown to stop service and clean up
     Services.obs.addObserver(this, "xpcom-shutdown", false);
 
-    // Start eventServer with self-signed certification
+    // Start TLSSocketServer with self-signed certification
     Cc["@mozilla.org/psm;1"].getService(Ci.nsISupports);
     certService.getOrCreateCert("tls-test", {
       handleCert: function(cert, result) {
@@ -197,13 +293,113 @@ this.RemoteControlService = {
           aReject("getCert " + result);
         } else {
           let self = RemoteControlService;
-          self._eventServer.start(self._default_port, cert);
+
+          // The listen queue needs to be long enough to handle
+          // network.http.max-persistent-connections-per-server or
+          // network.http.max-persistent-connections-per-proxy concurrent
+          // connections, plus a safety margin in case some other process is
+          // talking to the server as well.
+          let maxConnections = 5 + Math.max(
+            Services.prefs.getIntPref("network.http.max-persistent-connections-per-server"),
+            Services.prefs.getIntPref("network.http.max-persistent-connections-per-proxy"));
+
+          try {
+            // When automatically selecting a port, sometimes the chosen port is
+            // "blocked" from clients. So, we simply keep trying to to
+            // get a server socket until a valid port is obtained. We limit
+            // ourselves to finite attempts just so we don't loop forever.
+            let ios = Cc["@mozilla.org/network/io-service;1"]
+                        .getService(Ci.nsIIOService);
+            let socket;
+            for (let i = 100; i; i--) {
+              let temp = Cc["@mozilla.org/network/tls-server-socket;1"].createInstance(Ci.nsITLSServerSocket);
+              temp.init(self._default_port, false, maxConnections);
+              temp.serverCert = cert;
+
+              let allowed = ios.allowPort(temp.port, "http");
+              if (!allowed) {
+                debug(">>>Warning: obtained ServerSocket listens on a blocked " +
+                      "port: " + temp.port);
+              }
+
+              if (!allowed && self._port == -1) {
+                debug(">>>Throwing away ServerSocket with bad port.");
+                temp.close();
+                continue;
+              }
+
+              socket = temp;
+              break;
+            }
+
+            if (!socket) {
+              throw new Error("No socket server available. Are there no available ports?");
+            }
+
+            debug(">>> listening on port " + socket.port + ", " + maxConnections +
+                  " pending connections");
+
+            socket.serverCert = cert;
+            socket.setSessionCache(false);
+            socket.setSessionTickets(false);
+            socket.setRequestClientCertificate(Ci.nsITLSServerSocket.REQUEST_NEVER);
+
+            socket.asyncListen(self);
+            self._port = socket.port;
+            self._socket = socket;
+          } catch (e) {
+            debug("\n!!! could not start server on port " + port + ": " + e + "\n\n");
+            //throw Cr.NS_ERROR_NOT_AVAILABLE;
+            aReject("Start TLS");
+          }
+
           aResolve();
-          this._serverStatus = SERVER_STATUS.STARTED;
+          self._serverStatus = SERVER_STATUS.STARTED;
+          debug("finish start aResolve");
         }
       }
     });
     
+  },
+
+  /** True if this server has any open connections to it, false otherwise. */
+  _hasOpenConnections: function() {
+    //
+    // If we have any open connections, they're tracked as numeric properties on
+    // |this._connections|.  The non-standard __count__ property could be used
+    // to check whether there are any properties, but standard-wise, even
+    // looking forward to ES5, there's no less ugly yet still O(1) way to do
+    // this.
+    //
+    for (let n in this._connections) {
+      return true;
+    }
+    return false;
+  },
+
+  /**
+   * Notifies this server that the given connection has been closed.
+   *
+   * @param connection : Connection
+   *   the connection that was closed
+   */
+  _connectionClosed: function(connection) {
+    NS_ASSERT(connection.number in this._connections,
+              "closing a connection " + this + " that we never added to the " +
+              "set of open connections?");
+    NS_ASSERT(this._connections[connection.number] === connection,
+              "connection number mismatch?  " +
+              this._connections[connection.number]);
+    delete this._connections[connection.number];
+  },
+
+  /**
+   * Requests that the server be shut down when possible.
+   */
+  _requestQuit: function() {
+    dumpn(">>> requesting a quit");
+    dumpStack();
+    this._doQuit = true;
   },
 
   _base64ToArrayBuffer: function(base64) {
@@ -269,6 +465,194 @@ this.RemoteControlService = {
   // Export to SJS for cleaning current PIN code
   _clearPIN: function() {
     RemoteControlService._pin = null;
+  },
+
+  /**
+   * Get the value corresponding to a given key for SJS state preservation
+   * across requests.
+   */
+  _getSharedState: function(key) {
+    var state = this._sharedState;
+    if (key in state) {
+      return state[key];
+    }
+    return "";
+  },
+
+  /**
+   * Set the value corresponding to a given key for SJS state preservation
+   * across requests.
+   */
+  _setSharedState: function(key, value) {
+    if (typeof value !== "string") {
+      throw new Error("non-string value passed");
+    }
+    this._sharedState[key] = value;
+  },
+};
+
+function Connection(input, output, server, port, outgoingPort, number) {
+  debug("*** opening new connection " + number + " on port " + outgoingPort);
+
+  /** Stream of incoming data. */
+  this.input = input;
+
+  /** Stream for outgoing data. */
+  this.output = output;
+
+  /** The server associated with this request. */
+  this.server = server;
+
+  /** The port on which the server is running. */
+  this.port = port;
+
+  /** The outgoing poort used by this connection. */
+  this._outgoingPort = outgoingPort;
+
+  /** The serial number of this connection. */
+  this.number = number;
+
+  /** This allows a connection to disambiguate between a peer initiating a
+   *  close and the socket being forced closed on shutdown.
+   */
+  this._closed = false;
+}
+Connection.prototype = {
+  /** Closes this connection's input/output streams. */
+  close: function() {
+    if (this._closed) {
+      return;
+    }
+
+    debug("*** closing connection " + this.number +
+          " on port " + this._outgoingPort);
+
+    this.input.close();
+    this.output.close();
+    this._closed = true;
+
+    let server = this.server;
+    server._connectionClosed(this);
+
+    // If an error triggered a server shutdown, act on it now
+    if (server._doQuit) {
+      server.stop();
+    }
+  },
+
+  /** Converts this to a string for debugging purposes. */
+  toString: function() {
+    return "<Connection(" + this.number + "): " +
+           (this._closed ? "closed" : "open") + ">";
+  },
+};
+
+/** Returns an array of count bytes from the given input stream. */
+function readBytes(inputStream, count) {
+  return new BinaryInputStream(inputStream).readByteArray(count);
+}
+
+function bin2String(array) {
+  return String.fromCharCode.apply(null, new Uint16Array(array));
+}
+
+function CommandHandler(connection) {
+  this._connection = connection;
+
+  this._output = null;
+}
+CommandHandler.prototype = {
+  onInputStreamReady: function(input) {
+    debug("*** onInputStreamReady(input=" + input + ") on thread " +
+          Services.tm.currentThread + " (main is " +
+          Services.tm.mainThread + ")");
+
+    try {
+      var text = bin2String(readBytes(input, input.available()));
+      debug("*** text = " + text);
+
+      if (this._output == null) {
+        this._output = Components.classes["@mozilla.org/intl/converter-output-stream;1"]
+                       .createInstance(Components.interfaces.nsIConverterOutputStream);
+
+        this._output.init(this._connection.output, "UTF-8", 0, 0x0000);
+      }
+      
+      let event = JSON.parse(text);
+
+      try {
+        let channel = Services.io.newChannel("resource://gre/res/remotecontrol/client.sjs", null, null);
+        var fis = channel.open();
+        let sis = new ScriptableInputStream(fis);
+        let s = Cu.Sandbox(Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal));
+        s.importFunction(dump, "dump");
+        s.importFunction(atob, "atob");
+        s.importFunction(btoa, "btoa");
+
+        // Define a basic key-value state-preservation API across requests, with
+        // keys initially corresponding to the empty string.
+        let self = this;
+        s.importFunction(function getSharedState(key) {
+          return self._connection.server._getSharedState(key);
+        });
+        s.importFunction(function setSharedState(key, value) {
+          self._connection.server._setSharedState(key, value);
+        });
+
+        // Import function registered from external
+        for(let functionName in this._SJSFunctions) {
+          s.importFunction(this._connection.server._SJSFunctions[functionName], functionName);
+        }
+
+        try {
+          // Alas, the line number in errors dumped to console when calling the
+          // request handler is simply an offset from where we load the SJS file.
+          // Work around this in a reasonably non-fragile way by dynamically
+          // getting the line number where we evaluate the SJS file.  Don't
+          // separate these two lines!
+          var line = new Error().lineNumber;
+          Cu.evalInSandbox(sis.read(fis.available()), s, "latest");
+        } catch (e) {
+          debug("*** syntax error in SJS at " + channel.URI.path + ": " + e);
+        }
+
+        try {
+          s.handleEvent(event)
+        } catch (e) {
+          debug("*** error running SJS at " + channel.URI.path + ": " +
+               e + " on line " +
+               (e instanceof Error
+                ? e.lineNumber + " in httpd.js"
+                : (e.lineNumber - line)) + "\n");
+        }
+      } catch (e) {
+        debug(e.message);
+      }
+       finally {
+        fis.close();
+      }
+    } catch (e) { 
+      if (streamClosed(e)) {
+        debug("*** WARNING: unexpected error when reading from socket; will " +
+              "be treated as if the input stream had been closed");
+        debug("*** WARNING: actual error was: " + e);
+      }
+
+      // We've lost a race -- input has been closed, but we're still expecting
+      // to read more data.  available() will throw in this case, and since
+      // we're dead in the water now, destroy the connection.
+      dumpn("*** onInputStreamReady called on a closed input, destroying " +
+            "connection");
+      this._connection.close();
+      return;
+    }
+
+    if (text != "bye\n") {
+      input.asyncWait(this, 0, 0, Services.tm.currentThread);
+    } else {
+      this._output.close();
+      this._connection.close();
+    }
   },
 };
 
