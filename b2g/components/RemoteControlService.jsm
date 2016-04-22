@@ -8,7 +8,7 @@
  *
  *               RemoteControlService <-- Gecko Preference
  *
- *     user -->  RemoteControlEventServer.jsm --> sjs (gecko)
+ *     user -->  nsITLSSocketServer --> server script (gecko)
  *
  * All events from user are passed to server script (sjs), sjs runs in sandbox,
  * transfer JSON message and dispatch corresponding events to Gecko.
@@ -16,20 +16,11 @@
  * Here is related component location:
  * gecko/b2g/components/RemoteControlService.jsm
  * gecko/b2g/remotecontrol/*.sjs
- * gecko/b2g/components/RemoteControlEventServer.jsm
  *
  * For more details, please visit: https://wiki.mozilla.org/Firefox_OS/Remote_Control
  */
 
 "use strict";
-
-/* static functions */
-const DEBUG = true;
-const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
-
-function debug(aStr) {
-  dump("RemoteControlService: " + aStr + "\n");
-}
 
 this.EXPORTED_SYMBOLS = ["RemoteControlService"];
 
@@ -41,9 +32,6 @@ Cu.import("resource://gre/modules/debug.js");
 
 XPCOMUtils.defineLazyModuleGetter(this, "SystemAppProxy",
                           "resource://gre/modules/SystemAppProxy.jsm");
-
-//XPCOMUtils.defineLazyModuleGetter(this, "EventServer",
-//                          "resource://gre/modules/RemoteControlEventServer.jsm");
 
 XPCOMUtils.defineLazyServiceGetter(this, "UUIDGenerator",
                           "@mozilla.org/uuid-generator;1", "nsIUUIDGenerator");
@@ -64,9 +52,15 @@ const BinaryOutputStream = CC("@mozilla.org/binaryoutputstream;1",
                               "nsIBinaryOutputStream",
                               "setOutputStream");
 
-// For bi-direction share with Gaia remote-control app, use mozSettings here, not Gecko preference
-// Ex. the service adds authorized devices, app can revoke all
-const RC_SETTINGS_DEVICES = "remote-control.authorized-devices";
+/* static functions */
+function debug(aStr) {
+  dump("RemoteControlService: " + aStr + "\n");
+}
+
+const DEBUG = true;
+
+const REMOTE_CONTROL_EVENT = 'mozChromeRemoteControlEvent';
+const RC_PREF_DEVICES = "remotecontrol.authorized_devices";
 
 const SERVER_STATUS = {
   STOPPED: 0,
@@ -74,81 +68,65 @@ const SERVER_STATUS = {
 };
 
 this.RemoteControlService = {
-  //_eventServer: null,
+  // Remote Control service status
   _serverStatus: SERVER_STATUS.STOPPED,
-  _uuids: null, // record devices uuid : expire_timestamp pair
-  _default_port: null,
-  _UUID_expire_days: null,
-  _pin: null,
 
-  // For TLS socket service
+  // TLS socket server
+  _default_port: null,
   _port: undefined, // The port on which this service listens
   _socket: null, // The socket associated with this
   _doQuit: false, // Indicates when the service is to be shut down at the end of the request.
   _socketClosed: true, // True if the socket in this is closed, false otherwise.
   _connectionGen: 0, // Used for tracking existing connections
   _connections: {}, // Hash of all open connections, indexed by connection number
-  _sharedState: {}, // erver state storage
+
+  // SJS
+  _sharedState: {}, // Server state storage
+  _SJSFunctions: {}, // Functions export to SJS
+
+  // Connected devices
+  _uuids: null, // record devices uuid : expire_timestamp pair
+  _UUID_expire_days: null,
+
+  // J-PAKE pin pairing
+  _pin: null,
 
   init: function() {
     DEBUG && debug("init");
 
-    //this._eventServer = new EventServer();
-    this._uuids = {};
-
     // Initial member variables from Gecko preferences
-    this._default_port = Services.prefs.getIntPref("remotecontrol.default_server_port");
+    this._default_port = this._port = Services.prefs.getIntPref("remotecontrol.default_server_port");
+
+    this._uuids = JSON.parse(Services.prefs.getCharPref(RC_PREF_DEVICES));
     this._UUID_expire_days = Services.prefs.getIntPref("remotecontrol.UUID_expire_days");
 
     // Listen control mode change from gaia
     SystemAppProxy.addEventListener("mozContentEvent", this);
 
-    // Register internal functions export to SJS
-    //this._eventServer.registerSJSFunctions(
+    // Internal functions export to SJS
     this._SJSFunction = {
+      "generateUUID": this._generateUUID,
       "getPIN": this._getPIN,
       "clearPIN": this._clearPIN,
-      "generateUUID": this._generateUUID,
-    };//);
-
-    // Get stored UUIDs from SettingsDB
-    let settingsCallback = {
-      handle: function(name, result) {
-        switch (name) {
-          case RC_SETTINGS_DEVICES:
-            if (result === null) {
-              // If there is no device UUIDs in settings DB, set to empty key pair
-              RemoteControlService._uuids = {};
-            } else {
-              RemoteControlService._uuids = result;
-            }
-            break;
-        }
-      },
-      handleError: function(name) { },
     };
-
-    let lock = SettingsService.createLock();
-    lock.get(RC_SETTINGS_DEVICES, settingsCallback);
   },
 
   // PUBLIC API
-
-  // Start http server and register observers.
+  // Start TLS socket server.
   // Return a promise for start() resolves/reject to
-  start: function(ipaddr, port) {
+  start: function() {
     if (this._serverStatus == SERVER_STATUS.STARTED) {
       return Promise.reject("AlreadyStarted");
     }
 
     let promise = new Promise((aResolve, aReject) => {
-      this._doStart(aResolve, aReject, ipaddr, port);
+      this._doStart(aResolve, aReject);
     });
     return promise;
   },
 
   // Stop http server and clean up registered observers
-  // Return false if server not started, stop failed
+  // Return false if server not started, stop failed. Throw exception if socket not created.
   stop: function() {
     if (this._serverStatus == SERVER_STATUS.STOPPED) {
       return false;
@@ -158,7 +136,7 @@ this.RemoteControlService = {
       throw Cr.NS_ERROR_UNEXPECTED;
     }
 
-    debug(">>> stopping listening on port " + this._socket.port);
+    DEBUG && debug("Stop listening on port " + this._socket.port);
 
     Services.obs.removeObserver(this, "xpcom-shutdown");
 
@@ -170,7 +148,7 @@ this.RemoteControlService = {
     return true;
   },
 
-  // Listeners
+  // Observers and Listeners
   // nsIObserver
   observe: function(subject, topic, data) {
     switch (topic) {
@@ -210,76 +188,59 @@ this.RemoteControlService = {
     }
   },
 
-  // NSISERVERSOCKETLISTENER
-  /**
-   * Processes an incoming request coming in on the given socket and contained
-   * in the given transport.
-   */
+  // nsIServerSocketListener
   onSocketAccepted: function(socket, trans) {
-    debug("*** onSocketAccepted(socket=" + socket + ", trans=" + trans + ")");
-    debug(">>> new connection on " + trans.host + ":" + trans.port);
+    DEBUG && debug("onSocketAccepted(socket=" + socket + ", trans=" + trans + ")");
+    DEBUG && debug("New connection on " + trans.host + ":" + trans.port);
 
     const SEGMENT_SIZE = 8192;
     const SEGMENT_COUNT = 1024;
+
     try {
       var input = trans.openInputStream(0, SEGMENT_SIZE, SEGMENT_COUNT)
                        .QueryInterface(Ci.nsIAsyncInputStream);
       var output = trans.openOutputStream(0, 0, 0);
     } catch (e) {
-      debug("*** error opening transport streams: " + e);
+      DEBUG && debug("Error opening transport streams: " + e);
       trans.close(Cr.NS_BINDING_ABORTED);
       return;
     }
 
-    var connectionNumber = ++this._connectionGen;
+    let connectionNumber = ++this._connectionGen;
 
     try {
-      var conn = new Connection(input, output, this, socket.port, trans.port,
-                                connectionNumber);
-      var reader = new CommandHandler(conn);
+      var conn = new Connection(input, output, this, socket.port, trans.port, connectionNumber);
+      var reader = new EventHandler(conn);
 
       input.asyncWait(reader, 0, 0, Services.tm.mainThread);
     } catch (e) {
-      debug("*** error in initial request-processing stages: " + e);
+      DEBUG && debug("Error in initial connection: " + e);
       trans.close(Cr.NS_BINDING_ABORTED);
       return;
     }
 
     this._connections[connectionNumber] = conn;
-    debug("*** starting connection " + connectionNumber);
+    DEBUG && debug("Start connection " + connectionNumber);
   },
 
-  onHandshakeDone: function(socket, status) {
-    debug("*** onHandshakeDone(socket=" + socket + ", status=" + status + ")");
-    debug("Using TLS 1.2" + status.tlsVersionUsed);
-    debug("Using expected cipher" + status.cipherName);
-    debug("Using 128-bit key" + status.keyLength);
-    debug("Using 128-bit MAC" + status.macLength);
-  },
-
-  /**
-   * Called when the socket associated with this is closed.
-   */
   onStopListening: function(socket, status) {
-    debug(">>> shutting down server on port " + socket.port);
-    for (var n in this._connections) {
+    DEbug && debug("Shut down server on port " + socket.port);
+
+    for (let n in this._connections) {
       this._connections[n].close();
     }
+
     this._socketClosed = true;
-    if (this._hasOpenConnections()) {
-      debug("*** open connections!!!");
-    }
   },
 
-  // PRIVATE API
-  _doStart: function(aResolve, aReject, port) {
-    DEBUG && debug("start");
+  // PRIVATE FUNCTIONS
+  _doStart: function(aResolve, aReject) {
+    DEBUG && debug("doStart");
 
     if (this._socket) {
       throw Cr.NS_ERROR_ALREADY_INITIALIZED;
     }
 
-    this._port = port;
     this._doQuit = this._socketClosed = false;
 
     // Monitor xpcom-shutdown to stop service and clean up
@@ -287,7 +248,7 @@ this.RemoteControlService = {
 
     // Start TLSSocketServer with self-signed certification
     Cc["@mozilla.org/psm;1"].getService(Ci.nsISupports);
-    certService.getOrCreateCert("tls-test", {
+    certService.getOrCreateCert("RemoteControlService", {
       handleCert: function(cert, result) {
         if(result) {
           aReject("getCert " + result);
@@ -313,7 +274,7 @@ this.RemoteControlService = {
             let socket;
             for (let i = 100; i; i--) {
               let temp = Cc["@mozilla.org/network/tls-server-socket;1"].createInstance(Ci.nsITLSServerSocket);
-              temp.init(self._default_port, false, maxConnections);
+              temp.init(self._port, false, maxConnections);
               temp.serverCert = cert;
 
               let allowed = ios.allowPort(temp.port, "http");
@@ -556,12 +517,12 @@ function bin2String(array) {
   return String.fromCharCode.apply(null, new Uint16Array(array));
 }
 
-function CommandHandler(connection) {
+function EventHandler(connection) {
   this._connection = connection;
 
   this._output = null;
 }
-CommandHandler.prototype = {
+EventHandler.prototype = {
   onInputStreamReady: function(input) {
     debug("*** onInputStreamReady(input=" + input + ") on thread " +
           Services.tm.currentThread + " (main is " +
